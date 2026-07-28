@@ -145,7 +145,7 @@ func (c *secretCache) initKeys() error {
 	switch keyCipher.Type {
 	case AesCbc256_B64, AesCbc256_HmacSha256_B64:
 	default:
-		return fmt.Errorf("unsupported key cipher type %q", keyCipher.Type)
+		return fmt.Errorf("unsupported key cipher type %v", keyCipher.Type)
 	}
 
 	email := c.email()
@@ -294,7 +294,7 @@ func decryptWith(s CipherString, key, macKey []byte) ([]byte, error) {
 	case AesCbc256_B64, AesCbc256_HmacSha256_B64:
 		// continues below
 	default:
-		return nil, fmt.Errorf("decrypt: unsupported cipher type %q", s.Type)
+		return nil, fmt.Errorf("decrypt: unsupported cipher type %v", s.Type)
 	}
 
 	if s.Type == AesCbc256_HmacSha256_B64 {
@@ -339,7 +339,7 @@ func encryptWith(data []byte, typ CipherStringType, key, macKey []byte) (CipherS
 	switch typ {
 	case AesCbc256_B64, AesCbc256_HmacSha256_B64:
 	default:
-		return s, fmt.Errorf("encrypt: unsupported cipher type %q", s.Type)
+		return s, fmt.Errorf("encrypt: unsupported cipher type %v", s.Type)
 	}
 	s.Type = typ
 	data = padPKCS7(data, aes.BlockSize)

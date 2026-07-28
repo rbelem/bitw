@@ -25,7 +25,7 @@ var flagSet = flag.NewFlagSet("bitw", flag.ContinueOnError)
 func init() { flagSet.Usage = usage }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, `
+	fmt.Fprint(os.Stderr, `
 Usage of bitw:
 
 	bitw [command]
@@ -38,7 +38,7 @@ Commands:
 	dump    list all the stored login secrets
 	serve   start the org.freedesktop.secrets D-Bus service
 	config  print the current configuration
-`[1:])
+	`[1:])
 	flagSet.PrintDefaults()
 }
 
