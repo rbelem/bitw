@@ -108,7 +108,7 @@ func (c *secretCache) clientId() ([]byte, error) {
 	if c._clientId != nil {
 		return c._clientId, nil
 	}
-	if s := os.Getenv("CLIENT_ID"); s != "" {
+	if s := os.Getenv("BW_CLIENTID"); s != "" {
 		c._clientId = []byte(s)
 		return c._clientId, nil
 	}
@@ -124,7 +124,7 @@ func (c *secretCache) clientSecret() ([]byte, error) {
 	if c._clientSecret != nil {
 		return c._clientSecret, nil
 	}
-	if s := os.Getenv("CLIENT_SECRET"); s != "" {
+	if s := os.Getenv("BW_CLIENTSECRET"); s != "" {
 		c._clientSecret = []byte(s)
 		return c._clientSecret, nil
 	}
