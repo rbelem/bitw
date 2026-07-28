@@ -78,6 +78,11 @@ func httpDo(ctx context.Context, req *http.Request, recv interface{}) error {
 	if token, ok := ctx.Value(authToken{}).(string); ok {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
+	// Bitwarden server rejects requests without client-identifying headers.
+	// See https://github.com/bitwarden/mobile/pull/1757 and
+	// https://github.com/bitwarden/clients/issues/20486.
+	req.Header.Set("Bitwarden-Client-Name", "cli")
+	req.Header.Set("Bitwarden-Client-Version", "0.0.1-rbelem1")
 
 	res, err := httpClient.Do(req)
 	if err != nil {
