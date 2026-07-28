@@ -253,6 +253,37 @@ func twoFactorPrompt(resp *twoFactorResponse) (TwoFactorProvider, []byte, error)
 }
 
 func refreshToken(ctx context.Context) error {
+	if globalData.RefreshToken == "" {
+		return fmt.Errorf("no refresh token available; re-login required")
+	}
+
+	clientId, err := secrets.clientId()
+	if err != nil {
+		return fmt.Errorf("could not obtain client id for refresh: %v", err)
+	}
+
+	clientSecret, err := secrets.clientSecret()
+	if err != nil {
+		return fmt.Errorf("could not obtain client secret for refresh: %v", err)
+	}
+
+	values := urlValues(
+		"grant_type", "refresh_token",
+		"client_id", string(clientId[:]),
+		"client_secret", string(clientSecret[:]),
+		"refresh_token", globalData.RefreshToken,
+		"scope", loginApiKeyScope,
+	)
+
+	var tokLogin tokLoginResponse
+	if err := jsonPOST(ctx, idtURL+"/connect/token", &tokLogin, values); err != nil {
+		return fmt.Errorf("could not refresh token: %v", err)
+	}
+
+	globalData.AccessToken = tokLogin.AccessToken
+	globalData.RefreshToken = tokLogin.RefreshToken
+	globalData.TokenExpiry = time.Now().UTC().Add(time.Duration(tokLogin.ExpiresIn) * time.Second)
+	saveData = true
 	return nil
 }
 
