@@ -1,3 +1,7 @@
 # This script contains the passwords to our test accounts.
-# See https://github.com/mvdan/bitw/issues/27.
+# See https://github.com/mvden/bitw/issues/27.
 /secrets
+
+# Build artifacts (rbelem fork)
+/bitw
+*.test
