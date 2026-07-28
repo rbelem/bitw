@@ -1,6 +1,6 @@
-module mvdan.cc/bitw
+module github.com/rbelem/bitw
 
-go 1.19
+go 1.26
 
 require (
 	github.com/frankban/quicktest v1.14.4

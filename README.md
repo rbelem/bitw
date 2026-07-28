@@ -2,7 +2,7 @@
 
 A simple BitWarden client. Requires Go 1.19 or later.
 
-	go install mvdan.cc/bitw@latest
+	go install github.com/rbelem/bitw@latest
 
 The goal is a static and portable client which integrates well with one's
 system. For example, on Linux it implements the `org.freedesktop.secrets` D-Bus
