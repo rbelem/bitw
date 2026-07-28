@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
@@ -20,6 +21,7 @@ import (
 	"math"
 	"math/big"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/google/uuid"
@@ -74,12 +76,32 @@ func (c *secretCache) password() ([]byte, error) {
 		c._password = []byte(s)
 		return c._password, nil
 	}
+	// Try libsecret cache before falling back to the interactive prompt.
+	// The cache is populated by `secret-tool store --label="Bitwarden"
+	// bitwarden master-password` (see devbox-global bin/secrets-setup).
+	// Lookup failures are silent: we fall through to passwordPrompt.
+	if pw, err := readLibsecretPassword(); err == nil && len(pw) > 0 {
+		c._password = pw
+		return c._password, nil
+	}
 	password, err := passwordPrompt("Password")
 	if err != nil {
 		return nil, err
 	}
 	c._password = []byte(password)
 	return c._password, nil
+}
+
+// readLibsecretPassword shells out to `secret-tool` to look up the cached
+// master password under the libsecret item "bitwarden master-password".
+// Returns the trimmed password bytes, or an error if lookup failed.
+func readLibsecretPassword() ([]byte, error) {
+	cmd := exec.Command("secret-tool", "lookup", "bitwarden", "master-password")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	return bytes.TrimSpace(out), nil
 }
 
 func (c *secretCache) clientId() ([]byte, error) {
