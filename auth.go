@@ -69,7 +69,7 @@ func login(ctx context.Context, retryWithApiKey bool) error {
 	}
 
 	var preLogin preLoginResponse
-	if err := jsonPOST(ctx, apiURL+"/accounts/prelogin", &preLogin, preLoginRequest{
+	if err := jsonPOST(ctx, idtURL+"/accounts/prelogin", &preLogin, preLoginRequest{
 		Email: email,
 	}); err != nil {
 		return fmt.Errorf("could not pre-login: %v", err)
