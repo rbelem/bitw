@@ -80,58 +80,20 @@ func login(ctx context.Context, retryWithApiKey bool) error {
 	globalData.KDFParallelism = preLogin.KDFParallelism
 	saveData = true
 
+	// Try client_credentials first when API key env vars are present,
+	// or when retrying after a captcha. Fall back to password grant
+	// otherwise, or if client_credentials fails.
+	useApiKey := retryWithApiKey || os.Getenv("BW_CLIENTID") != ""
+
 	var values url.Values
-	if !retryWithApiKey {
-		password, err := secrets.password()
-		if err != nil {
-			return err
-		}
-
-		// First, we create the master key, with the password, the lowercase
-		// email as salt, and the number of iterations the server told us.
-		masterKey, err := deriveMasterKey(password, email, KDFType(preLogin.KDF), preLogin.KDFIterations, preLogin.KDFMemory, preLogin.KDFParallelism)
-		if err != nil {
-			return err
-		}
-
-		// Then we create the hashed password, with the master key as password,
-		// the password as hash, and just one iteration.
-		hashedPassword := b64enc.EncodeToString(pbkdf2.Key(masterKey, password,
-			1, 32, sha256.New))
-
-		// Now, we request an auth token.
-		// For some reason, this endpoint requires url-encoded values, and won't
-		// accept JSON. But of course, the response is JSON.
-		values = urlValues(
-			"grant_type", "password",
-			"username", email,
-			"password", string(hashedPassword),
-			"scope", loginScope,
-			"client_id", "connector", // seen in bitwarden/jslib
-			"deviceType", deviceType(),
-			"deviceName", deviceName,
-			"deviceIdentifier", globalData.DeviceID,
-		)
+	var grantErr error
+	if useApiKey {
+		values, grantErr = buildApiKeyGrant()
 	} else {
-		clientId, err := secrets.clientId()
-		if err != nil {
-			return err
-		}
-
-		clientSecret, err := secrets.clientSecret()
-		if err != nil {
-			return err
-		}
-
-		values = urlValues(
-			"client_id", string(clientId[:]),
-			"client_secret", string(clientSecret[:]),
-			"scope", loginApiKeyScope,
-			"grant_type", "client_credentials",
-			"deviceType", deviceType(),
-			"deviceName", deviceName,
-			"deviceIdentifier", globalData.DeviceID,
-		)
+		values, grantErr = buildPasswordGrant(email, preLogin)
+	}
+	if grantErr != nil {
+		return grantErr
 	}
 
 	now := time.Now().UTC()
@@ -155,18 +117,74 @@ func login(ctx context.Context, retryWithApiKey bool) error {
 			return fmt.Errorf("could not login via two-factor: %v", err)
 		}
 	} else if err != nil && strings.Contains(err.Error(), "Captcha required.") {
-		fmt.Println("The server presented us with a captcha.")
-		fmt.Println("The best way to prevent future captcha is by login at least one time via api-key.")
-		fmt.Println("You can read on how to obtain the keys at: https://bitwarden.com/help/personal-api-key/")
+		fmt.Fprintln(os.Stderr, "The server presented us with a captcha.")
+		fmt.Fprintln(os.Stderr, "The best way to prevent future captcha is by login at least one time via api-key.")
+		fmt.Fprintln(os.Stderr, "You can read on how to obtain the keys at: https://bitwarden.com/help/personal-api-key/")
 		return login(ctx, true)
 	} else if err != nil {
-		return fmt.Errorf("could not login via password: %v", err)
+		// If client_credentials was attempted due to env vars (not an
+		// explicit captcha retry), fall back to password grant.
+		if useApiKey && !retryWithApiKey {
+			values, grantErr = buildPasswordGrant(email, preLogin)
+			if grantErr != nil {
+				return grantErr
+			}
+			tokLogin = tokLoginResponse{}
+			if err := jsonPOST(ctx, idtURL+"/connect/token", &tokLogin, values); err != nil {
+				return fmt.Errorf("could not login via password: %v", err)
+			}
+		} else {
+			return fmt.Errorf("could not login: %v", err)
+		}
 	}
 	globalData.AccessToken = tokLogin.AccessToken
 	globalData.RefreshToken = tokLogin.RefreshToken
 	globalData.TokenExpiry = now.Add(time.Duration(tokLogin.ExpiresIn) * time.Second)
 	saveData = true
 	return nil
+}
+
+func buildApiKeyGrant() (url.Values, error) {
+	clientId, err := secrets.clientId()
+	if err != nil {
+		return nil, err
+	}
+	clientSecret, err := secrets.clientSecret()
+	if err != nil {
+		return nil, err
+	}
+	return urlValues(
+		"client_id", string(clientId[:]),
+		"client_secret", string(clientSecret[:]),
+		"scope", loginApiKeyScope,
+		"grant_type", "client_credentials",
+		"deviceType", deviceType(),
+		"deviceName", deviceName,
+		"deviceIdentifier", globalData.DeviceID,
+	), nil
+}
+
+func buildPasswordGrant(email string, preLogin preLoginResponse) (url.Values, error) {
+	password, err := secrets.password()
+	if err != nil {
+		return nil, err
+	}
+	masterKey, err := deriveMasterKey(password, email, KDFType(preLogin.KDF), preLogin.KDFIterations, preLogin.KDFMemory, preLogin.KDFParallelism)
+	if err != nil {
+		return nil, err
+	}
+	hashedPassword := b64enc.EncodeToString(pbkdf2.Key(masterKey, password,
+		1, 32, sha256.New))
+	return urlValues(
+		"grant_type", "password",
+		"username", email,
+		"password", string(hashedPassword),
+		"scope", loginScope,
+		"client_id", "connector", // seen in bitwarden/jslib
+		"deviceType", deviceType(),
+		"deviceName", deviceName,
+		"deviceIdentifier", globalData.DeviceID,
+	), nil
 }
 
 type TwoFactorProvider int
