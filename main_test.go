@@ -318,3 +318,51 @@ func TestEnsureTokenFastPath(t *testing.T) {
 	qt.Check(t, globalData.RefreshToken, qt.Equals, "")
 	qt.Check(t, globalData.TokenExpiry.After(time.Now()), qt.IsTrue)
 }
+
+// TestLoginSkipsEmailForClientCredentials is a regression guard for the
+// Phase 3a email-skip refactor (auth.go). The previous logic ran the
+// email check + /accounts/prelogin fetch unconditionally, which broke
+// client_credentials users who never configured $EMAIL.
+//
+// After the refactor: when BW_CLIENTID is set, login() must skip the
+// top-of-function email check and proceed to buildApiKeyGrant.
+//
+// The fake BW_CLIENTSECRET in this test cannot pass real OAuth, so
+// login() will fail somewhere down the line (network or grant error
+// or, in the worst case, the password-grant fallback email check).
+// We assert specifically that the error is NOT the
+// top-of-function email-check error (no "(password fallback)" suffix) —
+// that proves the unconditional email gate was removed.
+func TestLoginSkipsEmailForClientCredentials(t *testing.T) {
+	// Not parallel — mutates package-global env state.
+	origClientID := os.Getenv("BW_CLIENTID")
+	origClientSecret := os.Getenv("BW_CLIENTSECRET")
+	origEmail := os.Getenv("EMAIL")
+	origPassword := os.Getenv("PASSWORD")
+	t.Cleanup(func() {
+		os.Setenv("BW_CLIENTID", origClientID)
+		os.Setenv("BW_CLIENTSECRET", origClientSecret)
+		os.Setenv("EMAIL", origEmail)
+		os.Setenv("PASSWORD", origPassword)
+	})
+
+	// Ensure no email is configured and the API-key path is selected.
+	os.Unsetenv("EMAIL")
+	os.Unsetenv("PASSWORD")
+	os.Setenv("BW_CLIENTID", "user.00000000-0000-0000-0000-000000000000")
+	os.Setenv("BW_CLIENTSECRET", "bitw-test-placeholder-not-a-real-secret")
+
+	err := login(context.Background(), false)
+	qt.Check(t, err, qt.IsNotNil,
+		qt.Commentf("expected login() to fail with a network/grant error in the sandbox; got nil"))
+	const topOfFunctionEmailErr = "need a configured email or $EMAIL to log in"
+	// The top-of-function email check has no "(password fallback)" suffix.
+	// The fallback-path email check (auth.go) does have the suffix.
+	// We want to assert the top check was skipped.
+	if err != nil {
+		got := err.Error()
+		isTopCheckErr := strings.Contains(got, topOfFunctionEmailErr) && !strings.Contains(got, "(password fallback)")
+		qt.Check(t, !isTopCheckErr, qt.IsTrue,
+			qt.Commentf("login() must skip the top-of-function email check when BW_CLIENTID is set (Phase 3a); got: %v", err))
+	}
+}

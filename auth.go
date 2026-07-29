@@ -70,27 +70,33 @@ func deviceType() string {
 }
 
 func login(ctx context.Context, retryWithApiKey bool) error {
-	email := secrets.email()
-	if email == "" {
-		return fmt.Errorf("need a configured email or $EMAIL to log in")
-	}
-
-	var preLogin preLoginResponse
-	if err := jsonPOST(ctx, idtURL+"/accounts/prelogin", &preLogin, preLoginRequest{
-		Email: email,
-	}); err != nil {
-		return fmt.Errorf("could not pre-login: %v", err)
-	}
-	globalData.KDF = KDFType(preLogin.KDF)
-	globalData.KDFIterations = preLogin.KDFIterations
-	globalData.KDFMemory = preLogin.KDFMemory
-	globalData.KDFParallelism = preLogin.KDFParallelism
-	saveData = true
-
 	// Try client_credentials first when API key env vars are present,
 	// or when retrying after a captcha. Fall back to password grant
 	// otherwise, or if client_credentials fails.
 	useApiKey := retryWithApiKey || os.Getenv("BW_CLIENTID") != ""
+
+	// Email + /accounts/prelogin are only required for the password grant.
+	// client_credentials is a machine-to-machine OAuth flow that needs
+	// neither (ADR-0003 §Context). Skipping these here lets client_credentials
+	// users log in without configuring $EMAIL or a synced profile email.
+	var email string
+	var preLogin preLoginResponse
+	if !useApiKey {
+		email = secrets.email()
+		if email == "" {
+			return fmt.Errorf("need a configured email or $EMAIL to log in")
+		}
+		if err := jsonPOST(ctx, idtURL+"/accounts/prelogin", &preLogin, preLoginRequest{
+			Email: email,
+		}); err != nil {
+			return fmt.Errorf("could not pre-login: %v", err)
+		}
+		globalData.KDF = KDFType(preLogin.KDF)
+		globalData.KDFIterations = preLogin.KDFIterations
+		globalData.KDFMemory = preLogin.KDFMemory
+		globalData.KDFParallelism = preLogin.KDFParallelism
+		saveData = true
+	}
 
 	var values url.Values
 	var grantErr error
@@ -132,6 +138,27 @@ func login(ctx context.Context, retryWithApiKey bool) error {
 		// If client_credentials was attempted due to env vars (not an
 		// explicit captcha retry), fall back to password grant.
 		if useApiKey && !retryWithApiKey {
+			// Lazily fetch email + preLogin only if we skipped them at
+			// the top (because useApiKey was true). Preserves the
+			// original fallback semantics for users who have an email
+			// configured but whose API key was rejected for a
+			// non-captcha reason (e.g. revoked key).
+			if email == "" {
+				email = secrets.email()
+				if email == "" {
+					return fmt.Errorf("need a configured email or $EMAIL to log in (password fallback)")
+				}
+				if err := jsonPOST(ctx, idtURL+"/accounts/prelogin", &preLogin, preLoginRequest{
+					Email: email,
+				}); err != nil {
+					return fmt.Errorf("could not pre-login (password fallback): %v", err)
+				}
+				globalData.KDF = KDFType(preLogin.KDF)
+				globalData.KDFIterations = preLogin.KDFIterations
+				globalData.KDFMemory = preLogin.KDFMemory
+				globalData.KDFParallelism = preLogin.KDFParallelism
+				saveData = true
+			}
 			values, grantErr = buildPasswordGrant(email, preLogin)
 			if grantErr != nil {
 				return grantErr

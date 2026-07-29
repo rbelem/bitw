@@ -19,6 +19,8 @@ import (
 
 // TestLogin_ClientCredentialsFirst verifies that when BW_CLIENTID is set,
 // the client_credentials grant is attempted without prompting for a password.
+// As of Phase 3a (email-skip), /accounts/prelogin is also skipped — it is
+// only required for the password grant.
 func TestLogin_ClientCredentialsFirst(t *testing.T) {
 	// Set up a mock identity server that tracks which endpoints were called.
 	var preloginCalled, tokenCalled bool
@@ -63,6 +65,7 @@ func TestLogin_ClientCredentialsFirst(t *testing.T) {
 	defer func() { idtURL = oldIdtURL }()
 
 	// Set up environment: BW_CLIENTID and BW_CLIENTSECRET present.
+	// EMAIL is set to prove it is now ignored (Phase 3a email-skip).
 	os.Setenv("BW_CLIENTID", "test-client-id")
 	os.Setenv("BW_CLIENTSECRET", "test-client-secret")
 	os.Setenv("EMAIL", "test@example.com")
@@ -83,7 +86,9 @@ func TestLogin_ClientCredentialsFirst(t *testing.T) {
 	qt.Assert(t, err, qt.IsNil)
 
 	// Verify the flow.
-	qt.Assert(t, preloginCalled, qt.IsTrue, qt.Commentf("prelogin should be called"))
+	// Phase 3a: prelogin is NOT called when BW_CLIENTID is set (client_credentials
+	// grant does not need KDF parameters).
+	qt.Assert(t, preloginCalled, qt.IsFalse, qt.Commentf("prelogin must be skipped when BW_CLIENTID is set (Phase 3a email-skip)"))
 	qt.Assert(t, tokenCalled, qt.IsTrue, qt.Commentf("token endpoint should be called"))
 	qt.Assert(t, grantType, qt.Equals, "client_credentials", qt.Commentf("should use client_credentials grant"))
 
