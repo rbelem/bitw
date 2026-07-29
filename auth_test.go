@@ -213,3 +213,123 @@ func TestLogin_CaptchaNoticeToStderr(t *testing.T) {
 	qt.Assert(t, strings.Contains(stderrOutput, "captcha"), qt.IsTrue, qt.Commentf("stderr should contain captcha message, got: %q", stderrOutput))
 	qt.Assert(t, strings.Contains(stdoutOutput, "captcha"), qt.IsFalse, qt.Commentf("stdout should NOT contain captcha message, got: %q", stdoutOutput))
 }
+
+// TestLogin_BothEnvAndLibsecret_EnvWins verifies that when BW_CLIENTID is set
+// in env AND secretCache has different values (simulating libsecret), the env
+// values are used in the request.
+func TestLogin_BothEnvAndLibsecret_EnvWins(t *testing.T) {
+	var receivedClientId, receivedClientSecret string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/accounts/prelogin":
+			json.NewEncoder(w).Encode(preLoginResponse{
+				KDF:           0,
+				KDFIterations: 100000,
+			})
+		case "/connect/token":
+			r.ParseForm()
+			receivedClientId = r.FormValue("client_id")
+			receivedClientSecret = r.FormValue("client_secret")
+			json.NewEncoder(w).Encode(tokLoginResponse{
+				AccessToken:  "test-access-token",
+				RefreshToken: "test-refresh-token",
+				ExpiresIn:    3600,
+				TokenType:    "Bearer",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	oldIdtURL := idtURL
+	idtURL = server.URL
+	defer func() { idtURL = oldIdtURL }()
+
+	// Set env vars to one value
+	os.Setenv("BW_CLIENTID", "env-client-id")
+	os.Setenv("BW_CLIENTSECRET", "env-client-secret")
+	os.Setenv("EMAIL", "test@example.com")
+	defer func() {
+		os.Unsetenv("BW_CLIENTID")
+		os.Unsetenv("BW_CLIENTSECRET")
+		os.Unsetenv("EMAIL")
+	}()
+
+	// Set secretCache to different values (simulating libsecret)
+	globalData = dataFile{DeviceID: "test-device-id"}
+	secrets = secretCache{
+		data:          &globalData,
+		_clientId:     []byte("libsecret-client-id"),
+		_clientSecret: []byte("libsecret-client-secret"),
+	}
+	saveData = false
+
+	ctx := context.Background()
+	err := login(ctx, false)
+	qt.Assert(t, err, qt.IsNil)
+
+	// Verify env values were used, not libsecret values
+	qt.Assert(t, receivedClientId, qt.Equals, "env-client-id", qt.Commentf("should use env client_id, not libsecret"))
+	qt.Assert(t, receivedClientSecret, qt.Equals, "env-client-secret", qt.Commentf("should use env client_secret, not libsecret"))
+}
+
+// TestLogin_NoEnv_LibsecretFallback verifies that when BW_CLIENTID is NOT set
+// in env but secretCache has values (simulating libsecret), the libsecret
+// values are used.
+func TestLogin_NoEnv_LibsecretFallback(t *testing.T) {
+	var receivedClientId, receivedClientSecret string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/accounts/prelogin":
+			json.NewEncoder(w).Encode(preLoginResponse{
+				KDF:           0,
+				KDFIterations: 100000,
+			})
+		case "/connect/token":
+			r.ParseForm()
+			receivedClientId = r.FormValue("client_id")
+			receivedClientSecret = r.FormValue("client_secret")
+			json.NewEncoder(w).Encode(tokLoginResponse{
+				AccessToken:  "test-access-token",
+				RefreshToken: "test-refresh-token",
+				ExpiresIn:    3600,
+				TokenType:    "Bearer",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	oldIdtURL := idtURL
+	idtURL = server.URL
+	defer func() { idtURL = oldIdtURL }()
+
+	// No env vars set
+	os.Unsetenv("BW_CLIENTID")
+	os.Unsetenv("BW_CLIENTSECRET")
+	os.Setenv("EMAIL", "test@example.com")
+	defer func() {
+		os.Unsetenv("EMAIL")
+	}()
+
+	// Set secretCache values (simulating libsecret)
+	globalData = dataFile{DeviceID: "test-device-id"}
+	secrets = secretCache{
+		data:          &globalData,
+		_clientId:     []byte("libsecret-client-id"),
+		_clientSecret: []byte("libsecret-client-secret"),
+	}
+	saveData = false
+
+	// Manually trigger the client_credentials path by setting retryWithApiKey=true
+	// (since env is not set, useApiKey would be false otherwise)
+	ctx := context.Background()
+	err := login(ctx, true) // retryWithApiKey=true forces client_credentials path
+	qt.Assert(t, err, qt.IsNil)
+
+	// Verify libsecret values were used
+	qt.Assert(t, receivedClientId, qt.Equals, "libsecret-client-id", qt.Commentf("should use libsecret client_id when env is empty"))
+	qt.Assert(t, receivedClientSecret, qt.Equals, "libsecret-client-secret", qt.Commentf("should use libsecret client_secret when env is empty"))
+}

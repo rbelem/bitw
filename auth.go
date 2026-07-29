@@ -145,17 +145,28 @@ func login(ctx context.Context, retryWithApiKey bool) error {
 }
 
 func buildApiKeyGrant() (url.Values, error) {
-	clientId, err := secrets.clientId()
-	if err != nil {
-		return nil, err
-	}
-	clientSecret, err := secrets.clientSecret()
-	if err != nil {
-		return nil, err
+	// Env-first per ADR-0003 §Context (crypto.go:111,127); libsecret is the
+	// dual-storage mirror (secrets-refresh:97-101) and only consulted when
+	// the env vars are absent. Without this priority, users with creds
+	// only in env get a silent fallthrough to password grant.
+	clientId := os.Getenv("BW_CLIENTID")
+	clientSecret := os.Getenv("BW_CLIENTSECRET")
+	if clientId == "" || clientSecret == "" {
+		var err error
+		clientIdBytes, err := secrets.clientId()
+		if err != nil {
+			return nil, err
+		}
+		clientSecretBytes, err := secrets.clientSecret()
+		if err != nil {
+			return nil, err
+		}
+		clientId = string(clientIdBytes[:])
+		clientSecret = string(clientSecretBytes[:])
 	}
 	return urlValues(
-		"client_id", string(clientId[:]),
-		"client_secret", string(clientSecret[:]),
+		"client_id", clientId,
+		"client_secret", clientSecret,
 		"scope", loginApiKeyScope,
 		"grant_type", "client_credentials",
 		"deviceType", deviceType(),
