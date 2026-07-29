@@ -48,33 +48,25 @@ const (
 	loginApiKeyScope = "api"
 )
 
-func deviceType() string {
+// deviceTypeNum returns the numeric device type as an int, matching the
+// upstream device-type.enum.ts values. Single source of truth for both the
+// Device-Type header (api.go) and the deviceType body form field.
+func deviceTypeNum() int {
 	// The enum values come from https://github.com/bitwarden/clients/blob/main/libs/common/src/platform/enums/device-type.enum.ts.
 	switch runtime.GOOS {
 	case "linux":
-		return "25" // LinuxCLI — matches the `bw` CLI client_type
-	case "darwin":
-		return "7" // MacOS Desktop
-	case "windows":
-		return "6" // Windows Desktop
-	default:
-		return "14" // Unknown Browser, since we don't have a better fallback
-	}
-}
-
-// deviceTypeNum returns the numeric device type as an int, matching the
-// upstream device-type.enum.ts values. Used for the Device-Type header.
-func deviceTypeNum() int {
-	switch runtime.GOOS {
-	case "linux":
-		return 25 // LinuxCLI
+		return 25 // LinuxCLI — matches the `bw` CLI client_type
 	case "darwin":
 		return 7 // MacOS Desktop
 	case "windows":
 		return 6 // Windows Desktop
 	default:
-		return 14 // Unknown Browser
+		return 14 // Unknown Browser, since we don't have a better fallback
 	}
+}
+
+func deviceType() string {
+	return strconv.Itoa(deviceTypeNum())
 }
 
 func login(ctx context.Context, retryWithApiKey bool) error {

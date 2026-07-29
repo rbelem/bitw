@@ -19,6 +19,12 @@ import (
 	"time"
 )
 
+// clientVersion is the wire-protocol version sent to Bitwarden servers in the
+// User-Agent and Bitwarden-Client-Version headers. It matches the upstream
+// bitwarden/clients CLI version (per round-2 oracle review) and intentionally
+// diverges from the nix package version (see devbox.d/bitw/flake.nix).
+const clientVersion = "2026.7.0"
+
 var httpClient = &http.Client{
 	// Specific http calls can use lower timeouts via context.
 	Timeout: 10 * time.Second,
@@ -85,9 +91,9 @@ func httpDo(ctx context.Context, req *http.Request, recv interface{}) error {
 	// The header profile mirrors the upstream CLI (bitwarden/clients):
 	// libs/common/src/services/api.service.ts buildRequestHeaders.
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "Bitwarden_CLI/2026.7.0 (LINUX)")
+	req.Header.Set("User-Agent", "Bitwarden_CLI/"+clientVersion+" (LINUX)")
 	req.Header.Set("Bitwarden-Client-Name", "cli")
-	req.Header.Set("Bitwarden-Client-Version", "2026.7.0")
+	req.Header.Set("Bitwarden-Client-Version", clientVersion)
 	req.Header.Set("Device-Type", strconv.Itoa(deviceTypeNum()))
 
 	res, err := httpClient.Do(req)
