@@ -109,14 +109,17 @@ func TestLogin_ClientCredentialsFirst(t *testing.T) {
 // the password grant is used.
 func TestLogin_PasswordFallback(t *testing.T) {
 	var grantType string
+	var capturedHeaders http.Header
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/accounts/prelogin":
+			capturedHeaders = r.Header.Clone()
 			json.NewEncoder(w).Encode(preLoginResponse{
 				KDF:           0,
 				KDFIterations: 100000,
 			})
 		case "/connect/token":
+			capturedHeaders = r.Header.Clone()
 			r.ParseForm()
 			grantType = r.FormValue("grant_type")
 			json.NewEncoder(w).Encode(tokLoginResponse{
@@ -153,6 +156,13 @@ func TestLogin_PasswordFallback(t *testing.T) {
 	err := login(ctx, false)
 	qt.Assert(t, err, qt.IsNil)
 	qt.Assert(t, grantType, qt.Equals, "password", qt.Commentf("should use password grant"))
+
+	// Auth-Email must not be sent on the password grant request.
+	// The live identity.bitwarden.com server rejects this header with
+	// invalid_username_or_password, blocking password grant login.
+	// See commit message for the empirical curl evidence.
+	qt.Assert(t, capturedHeaders.Get("Auth-Email"), qt.Equals, "",
+		qt.Commentf("Auth-Email header must not be sent (live server rejects it as invalid_username_or_password)"))
 }
 
 // TestLogin_CaptchaNoticeToStderr verifies that captcha-related messages
