@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -81,8 +82,13 @@ func httpDo(ctx context.Context, req *http.Request, recv interface{}) error {
 	// Bitwarden server rejects requests without client-identifying headers.
 	// See https://github.com/bitwarden/mobile/pull/1757 and
 	// https://github.com/bitwarden/clients/issues/20486.
+	// The header profile mirrors the upstream CLI (bitwarden/clients):
+	// libs/common/src/services/api.service.ts buildRequestHeaders.
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "Bitwarden_CLI/2026.7.0 (LINUX)")
 	req.Header.Set("Bitwarden-Client-Name", "cli")
-	req.Header.Set("Bitwarden-Client-Version", "0.1.0")
+	req.Header.Set("Bitwarden-Client-Version", "2026.7.0")
+	req.Header.Set("Device-Type", strconv.Itoa(deviceTypeNum()))
 
 	res, err := httpClient.Do(req)
 	if err != nil {

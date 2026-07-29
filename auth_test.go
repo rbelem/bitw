@@ -22,7 +22,8 @@ import (
 func TestLogin_ClientCredentialsFirst(t *testing.T) {
 	// Set up a mock identity server that tracks which endpoints were called.
 	var preloginCalled, tokenCalled bool
-	var grantType string
+	var grantType, deviceTypeVal, deviceNameVal, deviceIdentifier string
+	var hdrClientName, hdrClientVersion, hdrDeviceType, hdrUserAgent, hdrAccept string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/accounts/prelogin":
@@ -35,6 +36,14 @@ func TestLogin_ClientCredentialsFirst(t *testing.T) {
 			tokenCalled = true
 			r.ParseForm()
 			grantType = r.FormValue("grant_type")
+			deviceTypeVal = r.FormValue("deviceType")
+			deviceNameVal = r.FormValue("deviceName")
+			deviceIdentifier = r.FormValue("deviceIdentifier")
+			hdrClientName = r.Header.Get("Bitwarden-Client-Name")
+			hdrClientVersion = r.Header.Get("Bitwarden-Client-Version")
+			hdrDeviceType = r.Header.Get("Device-Type")
+			hdrUserAgent = r.Header.Get("User-Agent")
+			hdrAccept = r.Header.Get("Accept")
 			// Return a successful token response.
 			json.NewEncoder(w).Encode(tokLoginResponse{
 				AccessToken:  "test-access-token",
@@ -77,6 +86,18 @@ func TestLogin_ClientCredentialsFirst(t *testing.T) {
 	qt.Assert(t, preloginCalled, qt.IsTrue, qt.Commentf("prelogin should be called"))
 	qt.Assert(t, tokenCalled, qt.IsTrue, qt.Commentf("token endpoint should be called"))
 	qt.Assert(t, grantType, qt.Equals, "client_credentials", qt.Commentf("should use client_credentials grant"))
+
+	// Verify body fields match upstream profile.
+	qt.Assert(t, deviceTypeVal, qt.Equals, "25", qt.Commentf("deviceType should be 25 (LinuxCLI)"))
+	qt.Assert(t, deviceNameVal, qt.Equals, "bitw", qt.Commentf("deviceName should be bitw"))
+	qt.Assert(t, deviceIdentifier, qt.Equals, "test-device-id", qt.Commentf("deviceIdentifier should match"))
+
+	// Verify central headers match upstream profile.
+	qt.Assert(t, hdrClientName, qt.Equals, "cli")
+	qt.Assert(t, hdrClientVersion, qt.Equals, "2026.7.0")
+	qt.Assert(t, hdrDeviceType, qt.Equals, "25")
+	qt.Assert(t, hdrUserAgent, qt.Equals, "Bitwarden_CLI/2026.7.0 (LINUX)")
+	qt.Assert(t, hdrAccept, qt.Equals, "application/json")
 }
 
 // TestLogin_PasswordFallback verifies that when BW_CLIENTID is NOT set,
@@ -219,6 +240,7 @@ func TestLogin_CaptchaNoticeToStderr(t *testing.T) {
 // values are used in the request.
 func TestLogin_BothEnvAndLibsecret_EnvWins(t *testing.T) {
 	var receivedClientId, receivedClientSecret string
+	var hdrClientName, hdrClientVersion, hdrDeviceType, hdrUserAgent, hdrAccept string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/accounts/prelogin":
@@ -230,6 +252,11 @@ func TestLogin_BothEnvAndLibsecret_EnvWins(t *testing.T) {
 			r.ParseForm()
 			receivedClientId = r.FormValue("client_id")
 			receivedClientSecret = r.FormValue("client_secret")
+			hdrClientName = r.Header.Get("Bitwarden-Client-Name")
+			hdrClientVersion = r.Header.Get("Bitwarden-Client-Version")
+			hdrDeviceType = r.Header.Get("Device-Type")
+			hdrUserAgent = r.Header.Get("User-Agent")
+			hdrAccept = r.Header.Get("Accept")
 			json.NewEncoder(w).Encode(tokLoginResponse{
 				AccessToken:  "test-access-token",
 				RefreshToken: "test-refresh-token",
@@ -272,6 +299,13 @@ func TestLogin_BothEnvAndLibsecret_EnvWins(t *testing.T) {
 	// Verify env values were used, not libsecret values
 	qt.Assert(t, receivedClientId, qt.Equals, "env-client-id", qt.Commentf("should use env client_id, not libsecret"))
 	qt.Assert(t, receivedClientSecret, qt.Equals, "env-client-secret", qt.Commentf("should use env client_secret, not libsecret"))
+
+	// Verify central headers are set correctly.
+	qt.Assert(t, hdrClientName, qt.Equals, "cli")
+	qt.Assert(t, hdrClientVersion, qt.Equals, "2026.7.0")
+	qt.Assert(t, hdrDeviceType, qt.Equals, "25")
+	qt.Assert(t, hdrUserAgent, qt.Equals, "Bitwarden_CLI/2026.7.0 (LINUX)")
+	qt.Assert(t, hdrAccept, qt.Equals, "application/json")
 }
 
 // TestLogin_NoEnv_LibsecretFallback verifies that when BW_CLIENTID is NOT set
@@ -279,6 +313,7 @@ func TestLogin_BothEnvAndLibsecret_EnvWins(t *testing.T) {
 // values are used.
 func TestLogin_NoEnv_LibsecretFallback(t *testing.T) {
 	var receivedClientId, receivedClientSecret string
+	var hdrClientName, hdrClientVersion, hdrDeviceType, hdrUserAgent, hdrAccept string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/accounts/prelogin":
@@ -290,6 +325,11 @@ func TestLogin_NoEnv_LibsecretFallback(t *testing.T) {
 			r.ParseForm()
 			receivedClientId = r.FormValue("client_id")
 			receivedClientSecret = r.FormValue("client_secret")
+			hdrClientName = r.Header.Get("Bitwarden-Client-Name")
+			hdrClientVersion = r.Header.Get("Bitwarden-Client-Version")
+			hdrDeviceType = r.Header.Get("Device-Type")
+			hdrUserAgent = r.Header.Get("User-Agent")
+			hdrAccept = r.Header.Get("Accept")
 			json.NewEncoder(w).Encode(tokLoginResponse{
 				AccessToken:  "test-access-token",
 				RefreshToken: "test-refresh-token",
@@ -332,4 +372,83 @@ func TestLogin_NoEnv_LibsecretFallback(t *testing.T) {
 	// Verify libsecret values were used
 	qt.Assert(t, receivedClientId, qt.Equals, "libsecret-client-id", qt.Commentf("should use libsecret client_id when env is empty"))
 	qt.Assert(t, receivedClientSecret, qt.Equals, "libsecret-client-secret", qt.Commentf("should use libsecret client_secret when env is empty"))
+
+	// Verify central headers are set correctly.
+	qt.Assert(t, hdrClientName, qt.Equals, "cli")
+	qt.Assert(t, hdrClientVersion, qt.Equals, "2026.7.0")
+	qt.Assert(t, hdrDeviceType, qt.Equals, "25")
+	qt.Assert(t, hdrUserAgent, qt.Equals, "Bitwarden_CLI/2026.7.0 (LINUX)")
+	qt.Assert(t, hdrAccept, qt.Equals, "application/json")
+}
+
+// TestLogin_HeadersMatchUpstream verifies that all 5 central headers on every
+// request match the upstream Bitwarden CLI profile (bitwarden/clients):
+//   - Accept: application/json
+//   - User-Agent: Bitwarden_CLI/2026.7.0 (LINUX)
+//   - Bitwarden-Client-Name: cli
+//   - Bitwarden-Client-Version: 2026.7.0
+//   - Device-Type: 25 (numeric LinuxCLI enum value)
+//
+// Bitwarden-Package-Type is intentionally NOT sent (CLI's packageType() returns null).
+func TestLogin_HeadersMatchUpstream(t *testing.T) {
+	var capturedHeaders http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/accounts/prelogin":
+			capturedHeaders = r.Header.Clone()
+			json.NewEncoder(w).Encode(preLoginResponse{
+				KDF:           0,
+				KDFIterations: 100000,
+			})
+		case "/connect/token":
+			capturedHeaders = r.Header.Clone()
+			r.ParseForm()
+			json.NewEncoder(w).Encode(tokLoginResponse{
+				AccessToken:  "test-access-token",
+				RefreshToken: "test-refresh-token",
+				ExpiresIn:    3600,
+				TokenType:    "Bearer",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	oldIdtURL := idtURL
+	idtURL = server.URL
+	defer func() { idtURL = oldIdtURL }()
+
+	os.Setenv("BW_CLIENTID", "test-client-id")
+	os.Setenv("BW_CLIENTSECRET", "test-client-secret")
+	os.Setenv("EMAIL", "test@example.com")
+	defer func() {
+		os.Unsetenv("BW_CLIENTID")
+		os.Unsetenv("BW_CLIENTSECRET")
+		os.Unsetenv("EMAIL")
+	}()
+
+	globalData = dataFile{DeviceID: "test-device-id"}
+	secrets = secretCache{data: &globalData}
+	saveData = false
+
+	ctx := context.Background()
+	err := login(ctx, false)
+	qt.Assert(t, err, qt.IsNil)
+
+	// Verify all 5 central headers match the upstream CLI profile.
+	qt.Assert(t, capturedHeaders.Get("Accept"), qt.Equals, "application/json",
+		qt.Commentf("Accept header must be application/json"))
+	qt.Assert(t, capturedHeaders.Get("User-Agent"), qt.Equals, "Bitwarden_CLI/2026.7.0 (LINUX)",
+		qt.Commentf("User-Agent must match upstream CLI format"))
+	qt.Assert(t, capturedHeaders.Get("Bitwarden-Client-Name"), qt.Equals, "cli",
+		qt.Commentf("Bitwarden-Client-Name must be cli"))
+	qt.Assert(t, capturedHeaders.Get("Bitwarden-Client-Version"), qt.Equals, "2026.7.0",
+		qt.Commentf("Bitwarden-Client-Version must be CalVer 2026.7.0"))
+	qt.Assert(t, capturedHeaders.Get("Device-Type"), qt.Equals, "25",
+		qt.Commentf("Device-Type header must be numeric 25 (LinuxCLI)"))
+
+	// Bitwarden-Package-Type must NOT be sent (CLI omits it).
+	qt.Assert(t, capturedHeaders.Get("Bitwarden-Package-Type"), qt.Equals, "",
+		qt.Commentf("Bitwarden-Package-Type must not be sent (CLI omits it)"))
 }

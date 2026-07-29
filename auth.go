@@ -49,16 +49,31 @@ const (
 )
 
 func deviceType() string {
-	// The enum strings come from https://github.com/bitwarden/server/blob/b19628c6f85a2cd5f1950ac222ba14840a88894d/src/Core/Enums/DeviceType.cs.
+	// The enum values come from https://github.com/bitwarden/clients/blob/main/libs/common/src/platform/enums/device-type.enum.ts.
 	switch runtime.GOOS {
 	case "linux":
-		return "8" // Linux Desktop
+		return "25" // LinuxCLI — matches the `bw` CLI client_type
 	case "darwin":
 		return "7" // MacOS Desktop
 	case "windows":
 		return "6" // Windows Desktop
 	default:
 		return "14" // Unknown Browser, since we don't have a better fallback
+	}
+}
+
+// deviceTypeNum returns the numeric device type as an int, matching the
+// upstream device-type.enum.ts values. Used for the Device-Type header.
+func deviceTypeNum() int {
+	switch runtime.GOOS {
+	case "linux":
+		return 25 // LinuxCLI
+	case "darwin":
+		return 7 // MacOS Desktop
+	case "windows":
+		return 6 // Windows Desktop
+	default:
+		return 14 // Unknown Browser
 	}
 }
 
