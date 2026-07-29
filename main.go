@@ -36,6 +36,7 @@ Commands:
 	sync    fetch the latest data from the server
 	login   force a new login, even if not necessary
 	dump    list all the stored login secrets
+	get     retrieve a cipher's fields (shell-eval or bare output)
 	serve   start the org.freedesktop.secrets D-Bus service
 	config  print the current configuration
 	`[1:])
@@ -326,6 +327,10 @@ func run(args ...string) (err error) {
 				fmt.Printf("%s", s)
 			}
 			fmt.Println()
+		}
+	case "get":
+		if err := cmdGet(ctx, args[1:]); err != nil {
+			return err
 		}
 	case "serve":
 		if err := serveDBus(ctx); err != nil {
