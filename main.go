@@ -345,6 +345,15 @@ func run(args ...string) (err error) {
 }
 
 func ensureToken(ctx context.Context) error {
+	// Fast path: a cached access token that is not yet expired is still
+	// usable. This matters for client_credentials grants, where the server
+	// does not return a refresh token (public API docs) and the only way
+	// to obtain a fresh access token is to re-authenticate. Skipping the
+	// re-auth here lets `bitw sync` succeed immediately after a successful
+	// `bitw login`, even when the cached RefreshToken is empty.
+	if globalData.AccessToken != "" && time.Now().Before(globalData.TokenExpiry) {
+		return nil
+	}
 	if globalData.RefreshToken == "" {
 		if err := login(ctx, false); err != nil {
 			return err

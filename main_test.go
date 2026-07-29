@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -275,4 +276,45 @@ func TestCipherString(t *testing.T) {
 			qt.Check(t, string(gotPlain), qt.Equals, test.want)
 		})
 	}
+}
+
+// TestEnsureTokenFastPath verifies that ensureToken returns immediately
+// without re-authenticating when the cached access token is still valid.
+// This is the client_credentials case: the server does not return a
+// refresh_token, so the previous logic would fall through to login() and
+// fail without a master password. The fast-path short-circuits on a valid
+// cached AccessToken + future TokenExpiry.
+func TestEnsureTokenFastPath(t *testing.T) {
+	t.Parallel()
+
+	// Save and restore the package-global cache around the test;
+	// other tests in this package may leave state behind.
+	origAccess := globalData.AccessToken
+	origRefresh := globalData.RefreshToken
+	origExpiry := globalData.TokenExpiry
+	t.Cleanup(func() {
+		globalData.AccessToken = origAccess
+		globalData.RefreshToken = origRefresh
+		globalData.TokenExpiry = origExpiry
+	})
+
+	// Cached state from a recent client_credentials login:
+	// valid access token, future expiry, no refresh token.
+	globalData.AccessToken = "test-access-token"
+	globalData.RefreshToken = ""
+	globalData.TokenExpiry = time.Now().Add(time.Hour)
+
+	start := time.Now()
+	err := ensureToken(context.Background())
+	elapsed := time.Since(start)
+
+	qt.Check(t, err, qt.IsNil)
+	// No network IO should have occurred; the fast-path is a pure
+	// in-memory check. 100ms is a generous bound for a local function
+	// call on any reasonable CI runner.
+	qt.Check(t, elapsed < 100*time.Millisecond, qt.IsTrue)
+	// The cached state must not have been mutated by the fast-path.
+	qt.Check(t, globalData.AccessToken, qt.Equals, "test-access-token")
+	qt.Check(t, globalData.RefreshToken, qt.Equals, "")
+	qt.Check(t, globalData.TokenExpiry.After(time.Now()), qt.IsTrue)
 }
