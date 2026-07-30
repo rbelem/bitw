@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -37,6 +38,7 @@ Commands:
 	login   force a new login, even if not necessary
 	dump    list all the stored login secrets
 	get     retrieve a cipher's fields (shell-eval or bare output)
+	cache   decrypt ciphers into a shell-sourceable env file
 	serve   start the org.freedesktop.secrets D-Bus service
 	config  print the current configuration
 	`[1:])
@@ -56,6 +58,10 @@ func main1(stderr io.Writer) int {
 			return 0
 		case flag.ErrHelp:
 			return 2
+		}
+		// errCacheFailed: summary already printed to stderr, exit 1 without printing.
+		if errors.Is(err, errCacheFailed) {
+			return 1
 		}
 		fmt.Fprintln(stderr, "error:", err)
 		return 1
@@ -330,6 +336,10 @@ func run(args ...string) (err error) {
 		}
 	case "get":
 		if err := cmdGet(ctx, args[1:]); err != nil {
+			return err
+		}
+	case "cache":
+		if err := cmdCache(ctx, args[1:]); err != nil {
 			return err
 		}
 	case "serve":

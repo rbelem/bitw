@@ -1,0 +1,492 @@
+// Copyright (c) 2019, Daniel Martí <mvdan@mvdan.cc>
+// See LICENSE for licensing information
+
+package main
+
+import (
+	"bytes"
+	"context"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	qt "github.com/frankban/quicktest"
+)
+
+// setupCacheTest initializes globalData and secrets with a working vault
+// (known master key derived from localTestPassword/localTestEmail). Returns
+// a temp directory for manifest and output files.
+func setupCacheTest(t *testing.T) string {
+	t.Helper()
+	globalData = dataFile{
+		KDFIterations: 100000,
+	}
+	globalData.Sync.Profile.Email = localTestEmail
+	globalData.Sync.Profile.Key.UnmarshalText([]byte(localTestKey2))
+	secrets = secretCache{
+		data:      &globalData,
+		_password: []byte(localTestPassword),
+	}
+	saveData = false
+	// Derive keys eagerly so test data encryption matches what cmdCache sees.
+	if err := secrets.initKeys(); err != nil {
+		t.Fatalf("initKeys: %v", err)
+	}
+	return t.TempDir()
+}
+
+// encryptStr is a test helper that encrypts a plaintext string using the
+// already-initialized secrets (master key). Panics on error.
+func encryptStr(t *testing.T, plain string) CipherString {
+	t.Helper()
+	cs, err := secrets.encrypt([]byte(plain))
+	if err != nil {
+		t.Fatalf("encrypt %q: %v", plain, err)
+	}
+	return cs
+}
+
+// testCipher builds a Login cipher with an encrypted name and password.
+func testCipher(t *testing.T, name, password string) Cipher {
+	t.Helper()
+	return Cipher{
+		Type: CipherLogin,
+		Name: encryptStr(t, name),
+		Login: &Login{
+			Password: encryptStr(t, password),
+		},
+	}
+}
+
+// corruptCipher builds a Login cipher whose name decrypts correctly but
+// whose password has a bogus MAC (forces "decrypt: MAC mismatch").
+func corruptCipher(t *testing.T, name string) Cipher {
+	t.Helper()
+	c := testCipher(t, name, "placeholder")
+	c.Login.Password = CipherString{
+		Type: AesCbc256_HmacSha256_B64,
+		IV:   make([]byte, 16),
+		CT:   make([]byte, 16),
+		MAC:  make([]byte, 32),
+	}
+	return c
+}
+
+// captureStderr redirects os.Stderr for the duration of fn and returns
+// everything written to it.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	defer func() { os.Stderr = old }()
+
+	done := make(chan string)
+	go func() {
+		var buf bytes.Buffer
+		io.Copy(&buf, r)
+		done <- buf.String()
+	}()
+
+	fn()
+	w.Close()
+	return <-done
+}
+
+// writeManifest writes an INI manifest to dir/cache.ini and returns its path.
+func writeManifest(t *testing.T, dir, content string) string {
+	t.Helper()
+	p := filepath.Join(dir, "cache.ini")
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+func TestCache_AllItems(t *testing.T) {
+	dir := setupCacheTest(t)
+
+	globalData.Sync.Ciphers = []Cipher{
+		testCipher(t, "cipher-a", "secret-a"),
+		testCipher(t, "cipher-b", "secret-b"),
+		testCipher(t, "cipher-c", "secret-c"),
+	}
+	// Add a custom field to cipher-c.
+	fName := encryptStr(t, "EXTRA_FIELD")
+	fVal := encryptStr(t, "extra-val")
+	globalData.Sync.Ciphers[2].Fields = []Field{
+		{Name: fName, Value: fVal},
+	}
+
+	manifest := writeManifest(t, dir, `
+[cache]
+cipher-a = VAR_A
+cipher-b = VAR_B
+cipher-c = VAR_C
+
+[cache-fields]
+cipher-c = EXTRA_FIELD
+
+[cache-aliases]
+ALIAS_A = VAR_A
+`)
+	output := filepath.Join(dir, "out.sh")
+
+	stderr := captureStderr(t, func() {
+		err := cmdCache(context.Background(), []string{
+			"-config", manifest,
+			"-output", output,
+		})
+		qt.Assert(t, err, qt.IsNil)
+	})
+
+	// Summary on stderr.
+	qt.Assert(t, strings.Contains(stderr, "4/4 items cached, 0 failed"), qt.IsTrue,
+		qt.Commentf("stderr: %q", stderr))
+
+	// File content.
+	data, err := os.ReadFile(output)
+	qt.Assert(t, err, qt.IsNil)
+	content := string(data)
+
+	qt.Assert(t, strings.Contains(content, "export VAR_A='secret-a'"), qt.IsTrue)
+	qt.Assert(t, strings.Contains(content, "export VAR_B='secret-b'"), qt.IsTrue)
+	qt.Assert(t, strings.Contains(content, "export VAR_C='secret-c'"), qt.IsTrue)
+	qt.Assert(t, strings.Contains(content, "export EXTRA_FIELD='extra-val'"), qt.IsTrue)
+	qt.Assert(t, strings.Contains(content, "export ALIAS_A=$VAR_A"), qt.IsTrue)
+
+	// File permissions: 0600.
+	info, err := os.Stat(output)
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, info.Mode().Perm(), qt.Equals, os.FileMode(0o600))
+
+	// No leftover tmp files.
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		qt.Assert(t, strings.HasSuffix(e.Name(), ".tmp"), qt.IsFalse,
+			qt.Commentf("leftover tmp file: %s", e.Name()))
+	}
+}
+
+func TestCache_PartialFailure(t *testing.T) {
+	dir := setupCacheTest(t)
+
+	globalData.Sync.Ciphers = []Cipher{
+		testCipher(t, "good-1", "val-1"),
+		corruptCipher(t, "bad-cipher"),
+		testCipher(t, "good-2", "val-2"),
+	}
+
+	manifest := writeManifest(t, dir, `
+[cache]
+good-1 = VAR_1
+bad-cipher = VAR_BAD
+good-2 = VAR_2
+`)
+	output := filepath.Join(dir, "out.sh")
+
+	stderr := captureStderr(t, func() {
+		err := cmdCache(context.Background(), []string{
+			"-config", manifest,
+			"-output", output,
+		})
+		qt.Assert(t, err, qt.Equals, errCacheFailed)
+	})
+
+	// File has the 2 good items + header.
+	data, err := os.ReadFile(output)
+	qt.Assert(t, err, qt.IsNil)
+	content := string(data)
+	qt.Assert(t, strings.Contains(content, "export VAR_1='val-1'"), qt.IsTrue)
+	qt.Assert(t, strings.Contains(content, "export VAR_2='val-2'"), qt.IsTrue)
+	qt.Assert(t, strings.Contains(content, "VAR_BAD"), qt.IsFalse)
+
+	// Stderr has the failure context.
+	qt.Assert(t, strings.Contains(stderr, "bad-cipher"), qt.IsTrue,
+		qt.Commentf("stderr: %q", stderr))
+	qt.Assert(t, strings.Contains(stderr, "MAC mismatch"), qt.IsTrue,
+		qt.Commentf("stderr: %q", stderr))
+	qt.Assert(t, strings.Contains(stderr, "kdf:"), qt.IsTrue,
+		qt.Commentf("stderr: %q", stderr))
+
+	// Summary line.
+	qt.Assert(t, strings.Contains(stderr, "2/3 items cached, 1 failed"), qt.IsTrue,
+		qt.Commentf("stderr: %q", stderr))
+}
+
+// TestCache_ErrorNotMasked is the regression guard: if anyone ever adds a
+// 2>/dev/null equivalent, this test must fail.
+func TestCache_ErrorNotMasked(t *testing.T) {
+	dir := setupCacheTest(t)
+
+	globalData.Sync.Ciphers = []Cipher{
+		corruptCipher(t, "doomed-cipher"),
+	}
+
+	manifest := writeManifest(t, dir, `
+[cache]
+doomed-cipher = DOOMED_VAR
+`)
+	output := filepath.Join(dir, "out.sh")
+
+	stderr := captureStderr(t, func() {
+		_ = cmdCache(context.Background(), []string{
+			"-config", manifest,
+			"-output", output,
+		})
+	})
+
+	// 1. Cipher name must appear.
+	qt.Assert(t, strings.Contains(stderr, "doomed-cipher"), qt.IsTrue,
+		qt.Commentf("stderr must contain cipher name; got: %q", stderr))
+
+	// 2. Actual error (not "Wrong password" or generic "failed").
+	qt.Assert(t, strings.Contains(stderr, "MAC mismatch"), qt.IsTrue,
+		qt.Commentf("stderr must contain actual error type; got: %q", stderr))
+
+	// 3. KDF type.
+	qt.Assert(t, strings.Contains(stderr, "kdf:"), qt.IsTrue,
+		qt.Commentf("stderr must contain KDF info; got: %q", stderr))
+
+	// 4. Email source.
+	// localTestEmail is set via Sync.Profile.Email, so emailSource() = "sync profile".
+	qt.Assert(t, strings.Contains(stderr, "email from:"), qt.IsTrue,
+		qt.Commentf("stderr must contain email source; got: %q", stderr))
+	qt.Assert(t, strings.Contains(stderr, "sync profile"), qt.IsTrue,
+		qt.Commentf("stderr must name the email source tier; got: %q", stderr))
+}
+
+func TestCache_CustomFields(t *testing.T) {
+	dir := setupCacheTest(t)
+
+	f1Name := encryptStr(t, "FIELD_ONE")
+	f1Val := encryptStr(t, "value-one")
+	f2Name := encryptStr(t, "FIELD_TWO")
+	f2Val := encryptStr(t, "value-two")
+
+	globalData.Sync.Ciphers = []Cipher{
+		func() Cipher {
+			c := testCipher(t, "multi-field", "pw")
+			c.Fields = []Field{
+				{Name: f1Name, Value: f1Val},
+				{Name: f2Name, Value: f2Val},
+			}
+			return c
+		}(),
+	}
+
+	manifest := writeManifest(t, dir, `
+[cache-fields]
+multi-field = FIELD_ONE,FIELD_TWO
+`)
+	output := filepath.Join(dir, "out.sh")
+
+	stderr := captureStderr(t, func() {
+		err := cmdCache(context.Background(), []string{
+			"-config", manifest,
+			"-output", output,
+		})
+		qt.Assert(t, err, qt.IsNil)
+	})
+
+	qt.Assert(t, strings.Contains(stderr, "2/2 items cached, 0 failed"), qt.IsTrue,
+		qt.Commentf("stderr: %q", stderr))
+
+	data, err := os.ReadFile(output)
+	qt.Assert(t, err, qt.IsNil)
+	content := string(data)
+	qt.Assert(t, strings.Contains(content, "export FIELD_ONE='value-one'"), qt.IsTrue)
+	qt.Assert(t, strings.Contains(content, "export FIELD_TWO='value-two'"), qt.IsTrue)
+}
+
+func TestCache_Aliases(t *testing.T) {
+	dir := setupCacheTest(t)
+
+	globalData.Sync.Ciphers = []Cipher{
+		testCipher(t, "gh-cipher", "ghp_secret"),
+	}
+
+	manifest := writeManifest(t, dir, `
+[cache]
+gh-cipher = GITHUB_TOKEN
+
+[cache-aliases]
+GH_TOKEN = GITHUB_TOKEN
+`)
+	output := filepath.Join(dir, "out.sh")
+
+	captureStderr(t, func() {
+		err := cmdCache(context.Background(), []string{
+			"-config", manifest,
+			"-output", output,
+		})
+		qt.Assert(t, err, qt.IsNil)
+	})
+
+	data, err := os.ReadFile(output)
+	qt.Assert(t, err, qt.IsNil)
+	content := string(data)
+	qt.Assert(t, strings.Contains(content, "export GITHUB_TOKEN='ghp_secret'"), qt.IsTrue)
+	qt.Assert(t, strings.Contains(content, "export GH_TOKEN=$GITHUB_TOKEN"), qt.IsTrue)
+}
+
+func TestCache_EmptyVault(t *testing.T) {
+	dir := setupCacheTest(t)
+
+	// No ciphers in vault.
+	globalData.Sync.Ciphers = nil
+
+	manifest := writeManifest(t, dir, `
+[cache]
+nonexistent = VAR_X
+`)
+	output := filepath.Join(dir, "out.sh")
+
+	stderr := captureStderr(t, func() {
+		err := cmdCache(context.Background(), []string{
+			"-config", manifest,
+			"-output", output,
+		})
+		qt.Assert(t, err, qt.Equals, errCacheFailed)
+	})
+
+	// File written with header only (no export lines).
+	data, err := os.ReadFile(output)
+	qt.Assert(t, err, qt.IsNil)
+	content := string(data)
+	qt.Assert(t, strings.Contains(content, "Auto-generated by bitw cache"), qt.IsTrue)
+	qt.Assert(t, strings.Contains(content, "export"), qt.IsFalse)
+
+	// Summary: 0/1 items cached, 1 failed (cipher not found).
+	qt.Assert(t, strings.Contains(stderr, "0/1 items cached, 1 failed"), qt.IsTrue,
+		qt.Commentf("stderr: %q", stderr))
+}
+
+// TestCache_UppercaseCipherName guards the case-preservation behavior for
+// cipher names in [cache] and [cache-fields] sections. Prior to the
+// RawKeys/GetRaw fix, the default INI KeyManipFunc lowercased keys, which
+// would have caused a manifest entry like "Devbox-Global/GitHub-Token" to
+// become "devbox-global/github-token" and miss the vault cipher. Real
+// vault cipher names happen to be lowercase, so this is a latent bug
+// caught by deliberate coverage. If anyone reverts to Keys()/Get(), this
+// test fails immediately.
+func TestCache_UppercaseCipherName(t *testing.T) {
+	dir := setupCacheTest(t)
+
+	globalData.Sync.Ciphers = []Cipher{
+		testCipher(t, "Devbox-Global/GitHub-Token", "ghp_uppercase_secret"),
+		testCipher(t, "Mixed-Case/Cipher", "another-secret"),
+	}
+
+	manifest := writeManifest(t, dir, `
+[cache]
+Devbox-Global/GitHub-Token = GITHUB_TOKEN
+Mixed-Case/Cipher = MIXED_VAR
+
+[cache-fields]
+Mixed-Case/Cipher = FIELD_A,FIELD_B
+`)
+	output := filepath.Join(dir, "out.sh")
+
+	// Add custom fields to Mixed-Case/Cipher.
+	fNameA := encryptStr(t, "FIELD_A")
+	fValA := encryptStr(t, "val-A")
+	fNameB := encryptStr(t, "FIELD_B")
+	fValB := encryptStr(t, "val-B")
+	globalData.Sync.Ciphers[1].Fields = []Field{
+		{Name: fNameA, Value: fValA},
+		{Name: fNameB, Value: fValB},
+	}
+
+	stderr := captureStderr(t, func() {
+		err := cmdCache(context.Background(), []string{
+			"-config", manifest,
+			"-output", output,
+		})
+		qt.Assert(t, err, qt.IsNil)
+	})
+
+	// cmdCache prints a summary line to stderr on success ("X/Y items cached,
+	// K failed"). On full success it should be "4/4 items cached, 0 failed\n".
+	qt.Assert(t, stderr, qt.Equals, "4/4 items cached, 0 failed\n")
+
+	content, err := os.ReadFile(output)
+	qt.Assert(t, err, qt.IsNil)
+	out := string(content)
+
+	// Both cipher names with original case should resolve and emit exports.
+	qt.Assert(t, out, qt.Contains, "export GITHUB_TOKEN='ghp_uppercase_secret'\n")
+	qt.Assert(t, out, qt.Contains, "export MIXED_VAR='another-secret'\n")
+	qt.Assert(t, out, qt.Contains, "export FIELD_A='val-A'\n")
+	qt.Assert(t, out, qt.Contains, "export FIELD_B='val-B'\n")
+}
+
+func TestCache_LibsecretMirror(t *testing.T) {
+	dir := setupCacheTest(t)
+
+	// Create a stub secret-tool that logs its argv to a file.
+	// The stub is prepended to PATH so it shadows any real secret-tool.
+	argsLog := filepath.Join(dir, "secret-tool-args")
+	stubDir := filepath.Join(dir, "bin")
+	os.MkdirAll(stubDir, 0o755)
+	stubPath := filepath.Join(stubDir, "secret-tool")
+	stub := "#!/bin/sh\necho \"$@\" >> " + argsLog + "\n"
+	if err := os.WriteFile(stubPath, []byte(stub), 0o755); err != nil {
+		t.Skipf("could not create stub: %v", err)
+	}
+
+	globalData.Sync.Ciphers = []Cipher{
+		testCipher(t, "bw-key", "client-secret-val"),
+	}
+
+	manifest := writeManifest(t, dir, `
+[cache]
+bw-key = BW_CLIENTSECRET
+`)
+	output := filepath.Join(dir, "out.sh")
+
+	// Prepend our stub dir to PATH.
+	oldPath := os.Getenv("PATH")
+	os.Setenv("PATH", stubDir+":"+oldPath)
+	defer os.Setenv("PATH", oldPath)
+
+	// Set the env var so the mirror has something to read.
+	os.Setenv("BW_CLIENTSECRET", "client-secret-val")
+	defer os.Unsetenv("BW_CLIENTSECRET")
+
+	captureStderr(t, func() {
+		err := cmdCache(context.Background(), []string{
+			"-config", manifest,
+			"-output", output,
+			"-mirror-libsecret", "BW_CLIENTSECRET",
+		})
+		qt.Assert(t, err, qt.IsNil)
+	})
+
+	// Verify the cache file was written.
+	data, err := os.ReadFile(output)
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, strings.Contains(string(data), "export BW_CLIENTSECRET='client-secret-val'"), qt.IsTrue)
+
+	// Verify secret-tool was called with the right arguments.
+	argsData, err := os.ReadFile(argsLog)
+	qt.Assert(t, err, qt.IsNil)
+	argsStr := string(argsData)
+	qt.Assert(t, strings.Contains(argsStr, "store"), qt.IsTrue,
+		qt.Commentf("secret-tool args: %q", argsStr))
+	qt.Assert(t, strings.Contains(argsStr, "--label=Bitwarden API key"), qt.IsTrue,
+		qt.Commentf("secret-tool args: %q", argsStr))
+	qt.Assert(t, strings.Contains(argsStr, "bitwarden"), qt.IsTrue,
+		qt.Commentf("secret-tool args: %q", argsStr))
+	qt.Assert(t, strings.Contains(argsStr, "BW_CLIENTSECRET"), qt.IsTrue,
+		qt.Commentf("secret-tool args: %q", argsStr))
+}

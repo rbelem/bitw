@@ -74,6 +74,26 @@ func (c *secretCache) email() string {
 	return email
 }
 
+// emailSource returns which tier supplied the email for diagnostic purposes.
+// Returns "$EMAIL", "config file", "sync profile", "JWT", or "" if no email
+// is available. Used in error messages to help users diagnose decryption
+// failures (e.g., if JWT email differs from vault email).
+func (c *secretCache) emailSource() string {
+	if os.Getenv("EMAIL") != "" {
+		return "$EMAIL"
+	}
+	if c._configEmail != "" {
+		return "config file"
+	}
+	if c.data.Sync.Profile.Email != "" {
+		return "sync profile"
+	}
+	if emailFromAccessToken(c.data.AccessToken) != "" {
+		return "JWT"
+	}
+	return ""
+}
+
 func (c *secretCache) password() ([]byte, error) {
 	if c._password != nil {
 		return c._password, nil
