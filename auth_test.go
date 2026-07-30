@@ -6,6 +6,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -466,4 +467,74 @@ func TestLogin_HeadersMatchUpstream(t *testing.T) {
 	// Bitwarden-Package-Type must NOT be sent (CLI omits it).
 	qt.Assert(t, capturedHeaders.Get("Bitwarden-Package-Type"), qt.Equals, "",
 		qt.Commentf("Bitwarden-Package-Type must not be sent (CLI omits it)"))
+}
+
+// TestEmailFromAccessToken verifies the JWT email-extraction helper used as
+// the 4th fallback in secrets.email() (crypto.go). Lets client_credentials
+// users decrypt without configuring $EMAIL, a config file entry, or waiting
+// for /sync to populate the profile email.
+func TestEmailFromAccessToken(t *testing.T) {
+	// buildJWT constructs a minimal JWT with the given payload claims.
+	// Signature is fake (we don't verify it — same as upstream CLI).
+	buildJWT := func(claims map[string]interface{}) string {
+		header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+		payloadBytes, _ := json.Marshal(claims)
+		payload := base64.RawURLEncoding.EncodeToString(payloadBytes)
+		return header + "." + payload + ".fake-signature"
+	}
+
+	tests := []struct {
+		name  string
+		token string
+		want  string
+	}{
+		{
+			name:  "valid JWT with email claim",
+			token: buildJWT(map[string]interface{}{"email": "test@example.com", "sub": "user-uuid"}),
+			want:  "test@example.com",
+		},
+		{
+			name:  "JWT without email claim",
+			token: buildJWT(map[string]interface{}{"sub": "user-uuid"}),
+			want:  "",
+		},
+		{
+			name:  "JWT with empty email claim",
+			token: buildJWT(map[string]interface{}{"email": "", "sub": "user-uuid"}),
+			want:  "",
+		},
+		{
+			name:  "not a JWT (no dots)",
+			token: "opaque-token-string",
+			want:  "",
+		},
+		{
+			name:  "not a JWT (one dot only)",
+			token: "header.payload",
+			want:  "",
+		},
+		{
+			name:  "empty token",
+			token: "",
+			want:  "",
+		},
+		{
+			name:  "JWT with malformed base64 payload",
+			token: "header.!!!not-base64!!!.signature",
+			want:  "",
+		},
+		{
+			name:  "JWT with invalid JSON payload",
+			token: "header." + base64.RawURLEncoding.EncodeToString([]byte("not json")) + ".signature",
+			want:  "",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := emailFromAccessToken(tc.token)
+			if got != tc.want {
+				t.Errorf("emailFromAccessToken(%q) = %q, want %q", tc.token, got, tc.want)
+			}
+		})
+	}
 }

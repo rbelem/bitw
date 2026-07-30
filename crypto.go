@@ -57,13 +57,19 @@ type secretCache struct {
 }
 
 func (c *secretCache) email() string {
-	// First try $EMAIL, then the config value, then the synced data value.
+	// First try $EMAIL, then the config value, then the synced data value,
+	// then the email claim from the access_token JWT. The JWT fallback lets
+	// client_credentials users decrypt without configuring email anywhere
+	// — the access token already carries the user's email.
 	email := os.Getenv("EMAIL")
 	if email == "" {
 		email = c._configEmail
 	}
 	if email == "" {
 		email = c.data.Sync.Profile.Email
+	}
+	if email == "" {
+		email = emailFromAccessToken(c.data.AccessToken)
 	}
 	return email
 }
