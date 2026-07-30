@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"time"
@@ -100,7 +102,9 @@ func readLine(prompt string) ([]byte, error) {
 	}
 }
 
-func passwordPrompt(prompt string) ([]byte, error) {
+// termPasswordPrompt reads a password from the terminal using term.ReadPassword.
+// This is the lowest-level prompt fallback when no GUI/SSH_ASKPASS tool is available.
+func termPasswordPrompt(prompt string) ([]byte, error) {
 	// TODO: Support cancellation with ^C. Currently not possible in any
 	// simple way. Closing os.Stdin on cancel doesn't seem to do the trick
 	// either. Simply doing an os.Exit keeps the terminal broken because of
@@ -121,6 +125,52 @@ func passwordPrompt(prompt string) ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("need a terminal to prompt for a password")
 	}
+}
+
+// promptWithAskpass tries GUI/SSH_ASKPASS programs before falling back to terminal.
+// Mirrors devbox-global/bin/secrets-setup's prompt_password helper.
+func promptWithAskpass(prompt string) ([]byte, error) {
+	// 1. zenity (GTK dialog — works on KDE too)
+	if path, _ := exec.LookPath("zenity"); path != "" {
+		out, err := exec.Command(path, "--password", "--title="+prompt).Output()
+		if err == nil {
+			return bytes.TrimSpace(out), nil
+		}
+	}
+	// 2. kdialog (KDE)
+	if path, _ := exec.LookPath("kdialog"); path != "" {
+		out, err := exec.Command(path, "--password", prompt).Output()
+		if err == nil {
+			return bytes.TrimSpace(out), nil
+		}
+	}
+	// 3. SSH_ASKPASS (program specified by env var; typical for non-TTY)
+	if askpass := os.Getenv("SSH_ASKPASS"); askpass != "" {
+		if _, err := exec.LookPath(askpass); err == nil {
+			display := os.Getenv("DISPLAY")
+			if display == "" {
+				display = ":0"
+			}
+			cmd := exec.Command(askpass, prompt)
+			cmd.Env = append(os.Environ(), "DISPLAY="+display)
+			out, err := cmd.Output()
+			if err == nil {
+				return bytes.TrimSpace(out), nil
+			}
+			// Fall through to terminal on SSH_ASKPASS failure
+			fmt.Fprintf(os.Stderr, "warning: SSH_ASKPASS=%s failed: %v\n", askpass, err)
+		}
+	}
+	// 4. Terminal fallback (existing /dev/tty logic)
+	return termPasswordPrompt(prompt)
+}
+
+func passwordPrompt(prompt string) ([]byte, error) {
+	out, err := promptWithAskpass(prompt)
+	if err != nil {
+		return nil, fmt.Errorf("could not obtain %s: %w", prompt, err)
+	}
+	return out, nil
 }
 
 var (
@@ -276,7 +326,7 @@ func run(args ...string) (err error) {
 	ctx = context.WithValue(ctx, authToken{}, globalData.AccessToken)
 	switch args[0] {
 	case "login":
-		if err := login(ctx, false); err != nil {
+		if err := login(ctx); err != nil {
 			return err
 		}
 	case "sync":
@@ -365,7 +415,7 @@ func ensureToken(ctx context.Context) error {
 		return nil
 	}
 	if globalData.RefreshToken == "" {
-		if err := login(ctx, false); err != nil {
+		if err := login(ctx); err != nil {
 			return err
 		}
 	} else if time.Now().After(globalData.TokenExpiry) {

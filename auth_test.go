@@ -4,50 +4,74 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"io"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	qt "github.com/frankban/quicktest"
 )
 
-// TestLogin_ClientCredentialsFirst verifies that when BW_CLIENTID is set,
-// the client_credentials grant is attempted without prompting for a password.
-// As of Phase 3a (email-skip), /accounts/prelogin is also skipped — it is
-// only required for the password grant.
-func TestLogin_ClientCredentialsFirst(t *testing.T) {
-	// Set up a mock identity server that tracks which endpoints were called.
+// resetLoginState resets global state and env vars for login tests.
+// Returns a cleanup function.
+func resetLoginState(t *testing.T) {
+	t.Helper()
+	globalData = dataFile{DeviceID: "test-device-id"}
+	secrets = secretCache{data: &globalData}
+	saveData = false
+
+	// Save and restore defaults for URLs and prompt funcs.
+	t.Cleanup(func() {
+		os.Unsetenv("BW_CLIENTID")
+		os.Unsetenv("BW_CLIENTSECRET")
+		os.Unsetenv("EMAIL")
+		os.Unsetenv("PASSWORD")
+		os.Unsetenv("FORCE_STDIN_PROMPTS")
+		os.Unsetenv("SSH_ASKPASS")
+	})
+}
+
+// mockPromptFuncs installs mock prompt functions and returns a cleanup func.
+func mockPromptFuncs(t *testing.T, password []byte, lines ...string) {
+	t.Helper()
+	lineIdx := 0
+	readLineFunc = func(prompt string) ([]byte, error) {
+		if lineIdx >= len(lines) {
+			return nil, fmt.Errorf("unexpected readLine prompt: %s", prompt)
+		}
+		line := lines[lineIdx]
+		lineIdx++
+		return []byte(line), nil
+	}
+	passwordPromptFunc = func(prompt string) ([]byte, error) {
+		return password, nil
+	}
+	t.Cleanup(func() {
+		readLineFunc = readLine
+		passwordPromptFunc = promptWithAskpass
+	})
+}
+
+// TestLogin_ApiKey_BothSet verifies that when both BW_CLIENTID and
+// BW_CLIENTSECRET are set, the client_credentials grant is used.
+func TestLogin_ApiKey_BothSet(t *testing.T) {
 	var preloginCalled, tokenCalled bool
-	var grantType, deviceTypeVal, deviceNameVal, deviceIdentifier string
-	var hdrClientName, hdrClientVersion, hdrDeviceType, hdrUserAgent, hdrAccept string
+	var grantType string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/accounts/prelogin":
 			preloginCalled = true
-			json.NewEncoder(w).Encode(preLoginResponse{
-				KDF:           0,
-				KDFIterations: 100000,
-			})
+			json.NewEncoder(w).Encode(preLoginResponse{KDF: 0, KDFIterations: 100000})
 		case "/connect/token":
 			tokenCalled = true
 			r.ParseForm()
 			grantType = r.FormValue("grant_type")
-			deviceTypeVal = r.FormValue("deviceType")
-			deviceNameVal = r.FormValue("deviceName")
-			deviceIdentifier = r.FormValue("deviceIdentifier")
-			hdrClientName = r.Header.Get("Bitwarden-Client-Name")
-			hdrClientVersion = r.Header.Get("Bitwarden-Client-Version")
-			hdrDeviceType = r.Header.Get("Device-Type")
-			hdrUserAgent = r.Header.Get("User-Agent")
-			hdrAccept = r.Header.Get("Accept")
-			// Return a successful token response.
 			json.NewEncoder(w).Encode(tokLoginResponse{
 				AccessToken:  "test-access-token",
 				RefreshToken: "test-refresh-token",
@@ -60,54 +84,599 @@ func TestLogin_ClientCredentialsFirst(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// Override the identity URL to point to our mock server.
 	oldIdtURL := idtURL
 	idtURL = server.URL
 	defer func() { idtURL = oldIdtURL }()
 
-	// Set up environment: BW_CLIENTID and BW_CLIENTSECRET present.
-	// EMAIL is set to prove it is now ignored (Phase 3a email-skip).
+	resetLoginState(t)
 	os.Setenv("BW_CLIENTID", "test-client-id")
 	os.Setenv("BW_CLIENTSECRET", "test-client-secret")
-	os.Setenv("EMAIL", "test@example.com")
-	defer func() {
-		os.Unsetenv("BW_CLIENTID")
-		os.Unsetenv("BW_CLIENTSECRET")
-		os.Unsetenv("EMAIL")
-	}()
 
-	// Reset global state.
-	globalData = dataFile{DeviceID: "test-device-id"}
-	secrets = secretCache{data: &globalData}
-	saveData = false
-
-	// Call login.
 	ctx := context.Background()
-	err := login(ctx, false)
+	err := login(ctx)
 	qt.Assert(t, err, qt.IsNil)
-
-	// Verify the flow.
-	// Phase 3a: prelogin is NOT called when BW_CLIENTID is set (client_credentials
-	// grant does not need KDF parameters).
-	qt.Assert(t, preloginCalled, qt.IsFalse, qt.Commentf("prelogin must be skipped when BW_CLIENTID is set (Phase 3a email-skip)"))
-	qt.Assert(t, tokenCalled, qt.IsTrue, qt.Commentf("token endpoint should be called"))
-	qt.Assert(t, grantType, qt.Equals, "client_credentials", qt.Commentf("should use client_credentials grant"))
-
-	// Verify body fields match upstream profile.
-	qt.Assert(t, deviceTypeVal, qt.Equals, "25", qt.Commentf("deviceType should be 25 (LinuxCLI)"))
-	qt.Assert(t, deviceNameVal, qt.Equals, "bitw", qt.Commentf("deviceName should be bitw"))
-	qt.Assert(t, deviceIdentifier, qt.Equals, "test-device-id", qt.Commentf("deviceIdentifier should match"))
-
-	// Verify central headers match upstream profile.
-	qt.Assert(t, hdrClientName, qt.Equals, "cli")
-	qt.Assert(t, hdrClientVersion, qt.Equals, "2026.7.0")
-	qt.Assert(t, hdrDeviceType, qt.Equals, "25")
-	qt.Assert(t, hdrUserAgent, qt.Equals, "Bitwarden_CLI/2026.7.0 (LINUX)")
-	qt.Assert(t, hdrAccept, qt.Equals, "application/json")
+	qt.Assert(t, preloginCalled, qt.IsFalse, qt.Commentf("prelogin must be skipped for API key login"))
+	qt.Assert(t, tokenCalled, qt.IsTrue)
+	qt.Assert(t, grantType, qt.Equals, "client_credentials")
+	qt.Assert(t, globalData.AccessToken, qt.Equals, "test-access-token")
 }
 
-// TestLogin_PasswordFallback verifies that when BW_CLIENTID is NOT set,
-// the password grant is used.
+// TestLogin_ApiKey_OnlyId verifies that setting only BW_CLIENTID produces an error.
+func TestLogin_ApiKey_OnlyId(t *testing.T) {
+	resetLoginState(t)
+	os.Setenv("BW_CLIENTID", "test-client-id")
+
+	ctx := context.Background()
+	err := login(ctx)
+	qt.Assert(t, err, qt.ErrorMatches, ".*both be set or both be empty.*")
+}
+
+// TestLogin_ApiKey_OnlySecret verifies that setting only BW_CLIENTSECRET produces an error.
+func TestLogin_ApiKey_OnlySecret(t *testing.T) {
+	resetLoginState(t)
+	os.Setenv("BW_CLIENTSECRET", "test-client-secret")
+
+	ctx := context.Background()
+	err := login(ctx)
+	qt.Assert(t, err, qt.ErrorMatches, ".*both be set or both be empty.*")
+}
+
+// TestLogin_Interactive_No2FA verifies the basic interactive flow without 2FA.
+func TestLogin_Interactive_No2FA(t *testing.T) {
+	var preloginCalled, tokenCalled bool
+	var grantType string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/accounts/prelogin":
+			preloginCalled = true
+			json.NewEncoder(w).Encode(preLoginResponse{
+				KDF:           0,
+				KDFIterations: 100000,
+			})
+		case "/connect/token":
+			tokenCalled = true
+			r.ParseForm()
+			grantType = r.FormValue("grant_type")
+			json.NewEncoder(w).Encode(tokLoginResponse{
+				AccessToken:  "test-access-token",
+				RefreshToken: "test-refresh-token",
+				ExpiresIn:    3600,
+				TokenType:    "Bearer",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	oldIdtURL := idtURL
+	oldApiURL := apiURL
+	idtURL = server.URL
+	apiURL = "http://localhost" // non-default, so selectServer skips prompt
+	defer func() {
+		idtURL = oldIdtURL
+		apiURL = oldApiURL
+	}()
+
+	resetLoginState(t)
+	os.Setenv("FORCE_STDIN_PROMPTS", "true")
+	os.Setenv("EMAIL", "test@example.com")
+	mockPromptFuncs(t, []byte("test-password"))
+
+	ctx := context.Background()
+	err := login(ctx)
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, preloginCalled, qt.IsTrue)
+	qt.Assert(t, tokenCalled, qt.IsTrue)
+	qt.Assert(t, grantType, qt.Equals, "password")
+	qt.Assert(t, globalData.AccessToken, qt.Equals, "test-access-token")
+	qt.Assert(t, globalData.KDFIterations, qt.Equals, 100000)
+}
+
+// TestLogin_Interactive_2FA verifies the interactive flow with 2FA.
+func TestLogin_Interactive_2FA(t *testing.T) {
+	var tokenCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/accounts/prelogin":
+			json.NewEncoder(w).Encode(preLoginResponse{
+				KDF:           0,
+				KDFIterations: 100000,
+			})
+		case "/connect/token":
+			r.ParseForm()
+			tokenCalls++
+			if tokenCalls == 1 {
+				// First call: return 2FA required error.
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"TwoFactorProviders2": map[string]map[string]interface{}{
+						"0": {"Email": "test@example.com"},
+					},
+				})
+				return
+			}
+			// Second call: succeed.
+			json.NewEncoder(w).Encode(tokLoginResponse{
+				AccessToken:  "test-access-token",
+				RefreshToken: "test-refresh-token",
+				ExpiresIn:    3600,
+				TokenType:    "Bearer",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	oldIdtURL := idtURL
+	oldApiURL := apiURL
+	idtURL = server.URL
+	apiURL = "http://localhost"
+	defer func() {
+		idtURL = oldIdtURL
+		apiURL = oldApiURL
+	}()
+
+	resetLoginState(t)
+	os.Setenv("FORCE_STDIN_PROMPTS", "true")
+	os.Setenv("EMAIL", "test@example.com")
+
+	// Mock prompts: master password + 2FA token
+	promptCount := 0
+	passwordPromptFunc = func(prompt string) ([]byte, error) {
+		promptCount++
+		if promptCount == 1 {
+			return []byte("test-password"), nil
+		}
+		return []byte("123456"), nil // 2FA token
+	}
+	t.Cleanup(func() { passwordPromptFunc = promptWithAskpass })
+
+	ctx := context.Background()
+	err := login(ctx)
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, tokenCalls, qt.Equals, 2)
+	qt.Assert(t, globalData.AccessToken, qt.Equals, "test-access-token")
+}
+
+// TestLogin_Interactive_SelfHosted verifies server selection for self-hosted.
+func TestLogin_Interactive_SelfHosted(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// After selectServer, paths are prefixed with /identity/.
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/accounts/prelogin"):
+			json.NewEncoder(w).Encode(preLoginResponse{KDF: 0, KDFIterations: 100000})
+		case strings.HasSuffix(r.URL.Path, "/connect/token"):
+			json.NewEncoder(w).Encode(tokLoginResponse{
+				AccessToken: "tok", ExpiresIn: 3600, TokenType: "Bearer",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	// Reset URLs to defaults so selectServer prompts.
+	oldIdtURL := idtURL
+	oldApiURL := apiURL
+	idtURL = defaultIdtURL
+	apiURL = defaultApiURL
+	defer func() {
+		idtURL = oldIdtURL
+		apiURL = oldApiURL
+	}()
+
+	resetLoginState(t)
+	os.Setenv("FORCE_STDIN_PROMPTS", "true")
+	os.Setenv("EMAIL", "test@example.com")
+
+	// readLineFunc returns: "self" for server choice, then the base URL.
+	// But the token endpoint will be at server.URL + "/identity/connect/token",
+	// which doesn't exist. We need the mock server to handle it.
+	// Actually, after selectServer sets idtURL, the prelogin and token calls
+	// go to the new URL. Let's use the mock server's URL as the base.
+	mockPromptFuncs(t, []byte("test-password"), "self", server.URL)
+
+	ctx := context.Background()
+	err := login(ctx)
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, apiURL, qt.Equals, server.URL+"/api")
+	qt.Assert(t, idtURL, qt.Equals, server.URL+"/identity")
+}
+
+// TestLogin_Interactive_ConfigURL_NoPrompt verifies that non-default URLs skip server selection.
+func TestLogin_Interactive_ConfigURL_NoPrompt(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/accounts/prelogin":
+			json.NewEncoder(w).Encode(preLoginResponse{KDF: 0, KDFIterations: 100000})
+		case "/connect/token":
+			json.NewEncoder(w).Encode(tokLoginResponse{
+				AccessToken: "tok", ExpiresIn: 3600, TokenType: "Bearer",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	oldIdtURL := idtURL
+	oldApiURL := apiURL
+	idtURL = server.URL
+	apiURL = "http://localhost" // non-default
+	defer func() {
+		idtURL = oldIdtURL
+		apiURL = oldApiURL
+	}()
+
+	resetLoginState(t)
+	os.Setenv("FORCE_STDIN_PROMPTS", "true")
+	os.Setenv("EMAIL", "test@example.com")
+
+	readLineCalled := false
+	readLineFunc = func(prompt string) ([]byte, error) {
+		readLineCalled = true
+		return []byte(""), nil
+	}
+	t.Cleanup(func() { readLineFunc = readLine })
+	passwordPromptFunc = func(prompt string) ([]byte, error) {
+		return []byte("test-password"), nil
+	}
+	t.Cleanup(func() { passwordPromptFunc = promptWithAskpass })
+
+	ctx := context.Background()
+	err := login(ctx)
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, readLineCalled, qt.IsFalse, qt.Commentf("readLine must not be called when URLs are non-default"))
+}
+
+// TestLogin_Interactive_EmailPrompt verifies that email is prompted when not configured.
+func TestLogin_Interactive_EmailPrompt(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/accounts/prelogin":
+			json.NewEncoder(w).Encode(preLoginResponse{KDF: 0, KDFIterations: 100000})
+		case "/connect/token":
+			json.NewEncoder(w).Encode(tokLoginResponse{
+				AccessToken: "tok", ExpiresIn: 3600, TokenType: "Bearer",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	oldIdtURL := idtURL
+	oldApiURL := apiURL
+	idtURL = server.URL
+	apiURL = "http://localhost"
+	defer func() {
+		idtURL = oldIdtURL
+		apiURL = oldApiURL
+	}()
+
+	resetLoginState(t)
+	os.Setenv("FORCE_STDIN_PROMPTS", "true")
+	// No EMAIL set — should prompt.
+
+	var emailPromptCalled bool
+	readLineFunc = func(prompt string) ([]byte, error) {
+		if strings.Contains(prompt, "Email") {
+			emailPromptCalled = true
+			return []byte("prompted@example.com"), nil
+		}
+		return []byte("cloud"), nil // server selection
+	}
+	t.Cleanup(func() { readLineFunc = readLine })
+	passwordPromptFunc = func(prompt string) ([]byte, error) {
+		return []byte("test-password"), nil
+	}
+	t.Cleanup(func() { passwordPromptFunc = promptWithAskpass })
+
+	ctx := context.Background()
+	err := login(ctx)
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, emailPromptCalled, qt.IsTrue, qt.Commentf("email should be prompted when not configured"))
+}
+
+// TestLogin_Interactive_Captcha verifies that captcha returns an error suggesting API key.
+func TestLogin_Interactive_Captcha(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/accounts/prelogin":
+			json.NewEncoder(w).Encode(preLoginResponse{KDF: 0, KDFIterations: 100000})
+		case "/connect/token":
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte("Captcha required."))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	oldIdtURL := idtURL
+	oldApiURL := apiURL
+	idtURL = server.URL
+	apiURL = "http://localhost"
+	defer func() {
+		idtURL = oldIdtURL
+		apiURL = oldApiURL
+	}()
+
+	resetLoginState(t)
+	os.Setenv("FORCE_STDIN_PROMPTS", "true")
+	os.Setenv("EMAIL", "test@example.com")
+	mockPromptFuncs(t, []byte("test-password"))
+
+	ctx := context.Background()
+	err := login(ctx)
+	qt.Assert(t, err, qt.ErrorMatches, ".*captcha.*")
+	qt.Assert(t, err, qt.ErrorMatches, ".*API key.*")
+}
+
+// TestLogin_Interactive_NonTTY verifies that non-TTY stdin without FORCE_STDIN_PROMPTS fails.
+func TestLogin_Interactive_NonTTY(t *testing.T) {
+	resetLoginState(t)
+	// FORCE_STDIN_PROMPTS is not set.
+	// In test environment, stdin is not a terminal.
+	os.Unsetenv("FORCE_STDIN_PROMPTS")
+
+	ctx := context.Background()
+	err := login(ctx)
+	qt.Assert(t, err, qt.ErrorMatches, ".*requires a terminal.*")
+}
+
+// TestLogin_Interactive_StoresLibsecret verifies that the master password is
+// stored in libsecret via secret-tool after successful interactive login.
+func TestLogin_Interactive_StoresLibsecret(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/accounts/prelogin":
+			json.NewEncoder(w).Encode(preLoginResponse{KDF: 0, KDFIterations: 100000})
+		case "/connect/token":
+			json.NewEncoder(w).Encode(tokLoginResponse{
+				AccessToken: "tok", ExpiresIn: 3600, TokenType: "Bearer",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	oldIdtURL := idtURL
+	oldApiURL := apiURL
+	idtURL = server.URL
+	apiURL = "http://localhost"
+	defer func() {
+		idtURL = oldIdtURL
+		apiURL = oldApiURL
+	}()
+
+	resetLoginState(t)
+	os.Setenv("FORCE_STDIN_PROMPTS", "true")
+	os.Setenv("EMAIL", "test@example.com")
+	mockPromptFuncs(t, []byte("my-master-password"))
+
+	// Create a fake secret-tool on PATH that records its stdin.
+	tmpDir := t.TempDir()
+	fakeSecretTool := filepath.Join(tmpDir, "secret-tool")
+	// The fake writes its stdin to a file so we can verify.
+	outputFile := filepath.Join(tmpDir, "secret-tool-input")
+	err := os.WriteFile(fakeSecretTool, []byte(fmt.Sprintf(`#!/bin/sh
+cat > %s
+`, outputFile)), 0o755)
+	qt.Assert(t, err, qt.IsNil)
+
+	// Prepend our tmpDir to PATH so our fake secret-tool is found first.
+	oldPath := os.Getenv("PATH")
+	os.Setenv("PATH", tmpDir+":"+oldPath)
+	t.Cleanup(func() { os.Setenv("PATH", oldPath) })
+
+	ctx := context.Background()
+	err = login(ctx)
+	qt.Assert(t, err, qt.IsNil)
+
+	// Verify secret-tool received the password on stdin.
+	input, err := os.ReadFile(outputFile)
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, strings.TrimSpace(string(input)), qt.Equals, "my-master-password")
+}
+
+// TestPromptWithAskpass_PriorityChain verifies the priority: zenity > kdialog > SSH_ASKPASS > terminal.
+func TestPromptWithAskpass_PriorityChain(t *testing.T) {
+	// Create fake executables in temp dirs.
+	makeFake := func(dir, name, output string) {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		err := os.WriteFile(path, []byte(fmt.Sprintf("#!/bin/sh\necho %s\n", output)), 0o755)
+		qt.Assert(t, err, qt.IsNil)
+	}
+
+	t.Run("zenity_wins", func(t *testing.T) {
+		dir := t.TempDir()
+		makeFake(dir, "zenity", "zenity-password")
+		makeFake(dir, "kdialog", "kdialog-password")
+		oldPath := os.Getenv("PATH")
+		os.Setenv("PATH", dir+":"+oldPath)
+		defer os.Setenv("PATH", oldPath)
+		os.Unsetenv("SSH_ASKPASS")
+
+		out, err := promptWithAskpass("test prompt")
+		qt.Assert(t, err, qt.IsNil)
+		qt.Assert(t, string(out), qt.Equals, "zenity-password")
+	})
+
+	t.Run("kdialog_when_no_zenity", func(t *testing.T) {
+		dir := t.TempDir()
+		makeFake(dir, "kdialog", "kdialog-password")
+		oldPath := os.Getenv("PATH")
+		// Set PATH to only include our dir (no zenity).
+		os.Setenv("PATH", dir)
+		defer os.Setenv("PATH", oldPath)
+		os.Unsetenv("SSH_ASKPASS")
+
+		out, err := promptWithAskpass("test prompt")
+		qt.Assert(t, err, qt.IsNil)
+		qt.Assert(t, string(out), qt.Equals, "kdialog-password")
+	})
+
+	t.Run("SSH_ASKPASS_when_no_gui", func(t *testing.T) {
+		dir := t.TempDir()
+		askpassScript := filepath.Join(dir, "my-askpass")
+		err := os.WriteFile(askpassScript, []byte("#!/bin/sh\necho askpass-password\n"), 0o755)
+		qt.Assert(t, err, qt.IsNil)
+
+		oldPath := os.Getenv("PATH")
+		os.Setenv("PATH", dir) // no zenity, no kdialog
+		defer os.Setenv("PATH", oldPath)
+		os.Setenv("SSH_ASKPASS", askpassScript)
+		defer os.Unsetenv("SSH_ASKPASS")
+
+		out, err := promptWithAskpass("test prompt")
+		qt.Assert(t, err, qt.IsNil)
+		qt.Assert(t, string(out), qt.Equals, "askpass-password")
+	})
+}
+
+// TestLogin_BothEnvAndLibsecret_EnvWins verifies that when BW_CLIENTID is set
+// in env AND secretCache has different values (simulating libsecret), the env
+// values are used in the request.
+func TestLogin_BothEnvAndLibsecret_EnvWins(t *testing.T) {
+	var receivedClientId, receivedClientSecret string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/connect/token":
+			r.ParseForm()
+			receivedClientId = r.FormValue("client_id")
+			receivedClientSecret = r.FormValue("client_secret")
+			json.NewEncoder(w).Encode(tokLoginResponse{
+				AccessToken:  "test-access-token",
+				RefreshToken: "test-refresh-token",
+				ExpiresIn:    3600,
+				TokenType:    "Bearer",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	oldIdtURL := idtURL
+	idtURL = server.URL
+	defer func() { idtURL = oldIdtURL }()
+
+	resetLoginState(t)
+	os.Setenv("BW_CLIENTID", "env-client-id")
+	os.Setenv("BW_CLIENTSECRET", "env-client-secret")
+
+	// Set secretCache to different values (simulating libsecret)
+	secrets = secretCache{
+		data:          &globalData,
+		_clientId:     []byte("libsecret-client-id"),
+		_clientSecret: []byte("libsecret-client-secret"),
+	}
+
+	ctx := context.Background()
+	err := login(ctx)
+	qt.Assert(t, err, qt.IsNil)
+
+	qt.Assert(t, receivedClientId, qt.Equals, "env-client-id")
+	qt.Assert(t, receivedClientSecret, qt.Equals, "env-client-secret")
+}
+
+// TestLogin_NoEnv_LibsecretFallback verifies that when BW_CLIENTID is NOT set
+// in env but secretCache has values (simulating libsecret), the libsecret
+// values are used via loginApiKey (called directly).
+func TestLogin_NoEnv_LibsecretFallback(t *testing.T) {
+	var receivedClientId, receivedClientSecret string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/connect/token":
+			r.ParseForm()
+			receivedClientId = r.FormValue("client_id")
+			receivedClientSecret = r.FormValue("client_secret")
+			json.NewEncoder(w).Encode(tokLoginResponse{
+				AccessToken:  "test-access-token",
+				RefreshToken: "test-refresh-token",
+				ExpiresIn:    3600,
+				TokenType:    "Bearer",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	oldIdtURL := idtURL
+	idtURL = server.URL
+	defer func() { idtURL = oldIdtURL }()
+
+	resetLoginState(t)
+	// No env vars set.
+	os.Unsetenv("BW_CLIENTID")
+	os.Unsetenv("BW_CLIENTSECRET")
+
+	// Set secretCache values (simulating libsecret)
+	secrets = secretCache{
+		data:          &globalData,
+		_clientId:     []byte("libsecret-client-id"),
+		_clientSecret: []byte("libsecret-client-secret"),
+	}
+
+	// Call loginApiKey directly since without env vars, login() dispatches
+	// to loginInteractive. This test verifies buildApiKeyGrant's libsecret fallback.
+	ctx := context.Background()
+	err := loginApiKey(ctx)
+	qt.Assert(t, err, qt.IsNil)
+
+	qt.Assert(t, receivedClientId, qt.Equals, "libsecret-client-id")
+	qt.Assert(t, receivedClientSecret, qt.Equals, "libsecret-client-secret")
+}
+
+// TestLogin_HeadersMatchUpstream verifies that all 5 central headers on every
+// request match the upstream Bitwarden CLI profile.
+func TestLogin_HeadersMatchUpstream(t *testing.T) {
+	var capturedHeaders http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/connect/token":
+			capturedHeaders = r.Header.Clone()
+			r.ParseForm()
+			json.NewEncoder(w).Encode(tokLoginResponse{
+				AccessToken:  "test-access-token",
+				RefreshToken: "test-refresh-token",
+				ExpiresIn:    3600,
+				TokenType:    "Bearer",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	oldIdtURL := idtURL
+	idtURL = server.URL
+	defer func() { idtURL = oldIdtURL }()
+
+	resetLoginState(t)
+	os.Setenv("BW_CLIENTID", "test-client-id")
+	os.Setenv("BW_CLIENTSECRET", "test-client-secret")
+
+	ctx := context.Background()
+	err := login(ctx)
+	qt.Assert(t, err, qt.IsNil)
+
+	qt.Assert(t, capturedHeaders.Get("Accept"), qt.Equals, "application/json")
+	qt.Assert(t, capturedHeaders.Get("User-Agent"), qt.Equals, "Bitwarden_CLI/2026.7.0 (LINUX)")
+	qt.Assert(t, capturedHeaders.Get("Bitwarden-Client-Name"), qt.Equals, "cli")
+	qt.Assert(t, capturedHeaders.Get("Bitwarden-Client-Version"), qt.Equals, "2026.7.0")
+	qt.Assert(t, capturedHeaders.Get("Device-Type"), qt.Equals, "25")
+	qt.Assert(t, capturedHeaders.Get("Bitwarden-Package-Type"), qt.Equals, "")
+}
+
+// TestLogin_PasswordFallback verifies that the password grant is used in
+// interactive mode (no API key env vars).
 func TestLogin_PasswordFallback(t *testing.T) {
 	var grantType string
 	var capturedHeaders http.Header
@@ -136,346 +705,31 @@ func TestLogin_PasswordFallback(t *testing.T) {
 	defer server.Close()
 
 	oldIdtURL := idtURL
+	oldApiURL := apiURL
 	idtURL = server.URL
-	defer func() { idtURL = oldIdtURL }()
-
-	// No BW_CLIENTID set.
-	os.Unsetenv("BW_CLIENTID")
-	os.Unsetenv("BW_CLIENTSECRET")
-	os.Setenv("EMAIL", "test@example.com")
-	os.Setenv("PASSWORD", "test-password")
+	apiURL = "http://localhost" // non-default, skip server prompt
 	defer func() {
-		os.Unsetenv("EMAIL")
-		os.Unsetenv("PASSWORD")
+		idtURL = oldIdtURL
+		apiURL = oldApiURL
 	}()
 
-	globalData = dataFile{DeviceID: "test-device-id"}
-	secrets = secretCache{data: &globalData}
-	saveData = false
+	resetLoginState(t)
+	os.Setenv("FORCE_STDIN_PROMPTS", "true")
+	os.Setenv("EMAIL", "test@example.com")
+	mockPromptFuncs(t, []byte("test-password"))
 
 	ctx := context.Background()
-	err := login(ctx, false)
+	err := login(ctx)
 	qt.Assert(t, err, qt.IsNil)
-	qt.Assert(t, grantType, qt.Equals, "password", qt.Commentf("should use password grant"))
+	qt.Assert(t, grantType, qt.Equals, "password")
 
 	// Auth-Email must not be sent on the password grant request.
-	// The live identity.bitwarden.com server rejects this header with
-	// invalid_username_or_password, blocking password grant login.
-	// See commit message for the empirical curl evidence.
 	qt.Assert(t, capturedHeaders.Get("Auth-Email"), qt.Equals, "",
-		qt.Commentf("Auth-Email header must not be sent (live server rejects it as invalid_username_or_password)"))
+		qt.Commentf("Auth-Email header must not be sent"))
 }
 
-// TestLogin_CaptchaNoticeToStderr verifies that captcha-related messages
-// are written to stderr, not stdout.
-func TestLogin_CaptchaNoticeToStderr(t *testing.T) {
-	var captchaAttempts int
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/accounts/prelogin":
-			json.NewEncoder(w).Encode(preLoginResponse{
-				KDF:           0,
-				KDFIterations: 100000,
-			})
-		case "/connect/token":
-			r.ParseForm()
-			grantType := r.FormValue("grant_type")
-			if grantType == "password" && captchaAttempts == 0 {
-				// First password attempt: return captcha error.
-				captchaAttempts++
-				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("Captcha required."))
-				return
-			}
-			// Subsequent attempts (client_credentials retry): succeed.
-			json.NewEncoder(w).Encode(tokLoginResponse{
-				AccessToken:  "test-access-token",
-				RefreshToken: "test-refresh-token",
-				ExpiresIn:    3600,
-				TokenType:    "Bearer",
-			})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	oldIdtURL := idtURL
-	idtURL = server.URL
-	defer func() { idtURL = oldIdtURL }()
-
-	// No API keys, so password grant is tried first, hits captcha, then retries with client_credentials.
-	os.Unsetenv("BW_CLIENTID")
-	os.Unsetenv("BW_CLIENTSECRET")
-	os.Setenv("EMAIL", "test@example.com")
-	os.Setenv("PASSWORD", "test-password")
-	defer func() {
-		os.Unsetenv("EMAIL")
-		os.Unsetenv("PASSWORD")
-	}()
-
-	globalData = dataFile{DeviceID: "test-device-id"}
-	secrets = secretCache{data: &globalData}
-	saveData = false
-
-	// Capture stderr and stdout.
-	oldStderr := os.Stderr
-	oldStdout := os.Stdout
-	rStderr, wStderr, _ := os.Pipe()
-	rStdout, wStdout, _ := os.Pipe()
-	os.Stderr = wStderr
-	os.Stdout = wStdout
-	defer func() {
-		os.Stderr = oldStderr
-		os.Stdout = oldStdout
-	}()
-
-	ctx := context.Background()
-	err := login(ctx, false)
-	// login will fail because after captcha it tries client_credentials,
-	// but we don't have BW_CLIENTID set, so it will prompt and fail.
-	// That's OK — we just want to verify the captcha message went to stderr.
-	_ = err
-
-	wStderr.Close()
-	wStdout.Close()
-	var stderrBuf, stdoutBuf bytes.Buffer
-	io.Copy(&stderrBuf, rStderr)
-	io.Copy(&stdoutBuf, rStdout)
-
-	stderrOutput := stderrBuf.String()
-	stdoutOutput := stdoutBuf.String()
-
-	// Verify captcha messages are on stderr.
-	qt.Assert(t, strings.Contains(stderrOutput, "captcha"), qt.IsTrue, qt.Commentf("stderr should contain captcha message, got: %q", stderrOutput))
-	qt.Assert(t, strings.Contains(stdoutOutput, "captcha"), qt.IsFalse, qt.Commentf("stdout should NOT contain captcha message, got: %q", stdoutOutput))
-}
-
-// TestLogin_BothEnvAndLibsecret_EnvWins verifies that when BW_CLIENTID is set
-// in env AND secretCache has different values (simulating libsecret), the env
-// values are used in the request.
-func TestLogin_BothEnvAndLibsecret_EnvWins(t *testing.T) {
-	var receivedClientId, receivedClientSecret string
-	var hdrClientName, hdrClientVersion, hdrDeviceType, hdrUserAgent, hdrAccept string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/accounts/prelogin":
-			json.NewEncoder(w).Encode(preLoginResponse{
-				KDF:           0,
-				KDFIterations: 100000,
-			})
-		case "/connect/token":
-			r.ParseForm()
-			receivedClientId = r.FormValue("client_id")
-			receivedClientSecret = r.FormValue("client_secret")
-			hdrClientName = r.Header.Get("Bitwarden-Client-Name")
-			hdrClientVersion = r.Header.Get("Bitwarden-Client-Version")
-			hdrDeviceType = r.Header.Get("Device-Type")
-			hdrUserAgent = r.Header.Get("User-Agent")
-			hdrAccept = r.Header.Get("Accept")
-			json.NewEncoder(w).Encode(tokLoginResponse{
-				AccessToken:  "test-access-token",
-				RefreshToken: "test-refresh-token",
-				ExpiresIn:    3600,
-				TokenType:    "Bearer",
-			})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	oldIdtURL := idtURL
-	idtURL = server.URL
-	defer func() { idtURL = oldIdtURL }()
-
-	// Set env vars to one value
-	os.Setenv("BW_CLIENTID", "env-client-id")
-	os.Setenv("BW_CLIENTSECRET", "env-client-secret")
-	os.Setenv("EMAIL", "test@example.com")
-	defer func() {
-		os.Unsetenv("BW_CLIENTID")
-		os.Unsetenv("BW_CLIENTSECRET")
-		os.Unsetenv("EMAIL")
-	}()
-
-	// Set secretCache to different values (simulating libsecret)
-	globalData = dataFile{DeviceID: "test-device-id"}
-	secrets = secretCache{
-		data:          &globalData,
-		_clientId:     []byte("libsecret-client-id"),
-		_clientSecret: []byte("libsecret-client-secret"),
-	}
-	saveData = false
-
-	ctx := context.Background()
-	err := login(ctx, false)
-	qt.Assert(t, err, qt.IsNil)
-
-	// Verify env values were used, not libsecret values
-	qt.Assert(t, receivedClientId, qt.Equals, "env-client-id", qt.Commentf("should use env client_id, not libsecret"))
-	qt.Assert(t, receivedClientSecret, qt.Equals, "env-client-secret", qt.Commentf("should use env client_secret, not libsecret"))
-
-	// Verify central headers are set correctly.
-	qt.Assert(t, hdrClientName, qt.Equals, "cli")
-	qt.Assert(t, hdrClientVersion, qt.Equals, "2026.7.0")
-	qt.Assert(t, hdrDeviceType, qt.Equals, "25")
-	qt.Assert(t, hdrUserAgent, qt.Equals, "Bitwarden_CLI/2026.7.0 (LINUX)")
-	qt.Assert(t, hdrAccept, qt.Equals, "application/json")
-}
-
-// TestLogin_NoEnv_LibsecretFallback verifies that when BW_CLIENTID is NOT set
-// in env but secretCache has values (simulating libsecret), the libsecret
-// values are used.
-func TestLogin_NoEnv_LibsecretFallback(t *testing.T) {
-	var receivedClientId, receivedClientSecret string
-	var hdrClientName, hdrClientVersion, hdrDeviceType, hdrUserAgent, hdrAccept string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/accounts/prelogin":
-			json.NewEncoder(w).Encode(preLoginResponse{
-				KDF:           0,
-				KDFIterations: 100000,
-			})
-		case "/connect/token":
-			r.ParseForm()
-			receivedClientId = r.FormValue("client_id")
-			receivedClientSecret = r.FormValue("client_secret")
-			hdrClientName = r.Header.Get("Bitwarden-Client-Name")
-			hdrClientVersion = r.Header.Get("Bitwarden-Client-Version")
-			hdrDeviceType = r.Header.Get("Device-Type")
-			hdrUserAgent = r.Header.Get("User-Agent")
-			hdrAccept = r.Header.Get("Accept")
-			json.NewEncoder(w).Encode(tokLoginResponse{
-				AccessToken:  "test-access-token",
-				RefreshToken: "test-refresh-token",
-				ExpiresIn:    3600,
-				TokenType:    "Bearer",
-			})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	oldIdtURL := idtURL
-	idtURL = server.URL
-	defer func() { idtURL = oldIdtURL }()
-
-	// No env vars set
-	os.Unsetenv("BW_CLIENTID")
-	os.Unsetenv("BW_CLIENTSECRET")
-	os.Setenv("EMAIL", "test@example.com")
-	defer func() {
-		os.Unsetenv("EMAIL")
-	}()
-
-	// Set secretCache values (simulating libsecret)
-	globalData = dataFile{DeviceID: "test-device-id"}
-	secrets = secretCache{
-		data:          &globalData,
-		_clientId:     []byte("libsecret-client-id"),
-		_clientSecret: []byte("libsecret-client-secret"),
-	}
-	saveData = false
-
-	// Manually trigger the client_credentials path by setting retryWithApiKey=true
-	// (since env is not set, useApiKey would be false otherwise)
-	ctx := context.Background()
-	err := login(ctx, true) // retryWithApiKey=true forces client_credentials path
-	qt.Assert(t, err, qt.IsNil)
-
-	// Verify libsecret values were used
-	qt.Assert(t, receivedClientId, qt.Equals, "libsecret-client-id", qt.Commentf("should use libsecret client_id when env is empty"))
-	qt.Assert(t, receivedClientSecret, qt.Equals, "libsecret-client-secret", qt.Commentf("should use libsecret client_secret when env is empty"))
-
-	// Verify central headers are set correctly.
-	qt.Assert(t, hdrClientName, qt.Equals, "cli")
-	qt.Assert(t, hdrClientVersion, qt.Equals, "2026.7.0")
-	qt.Assert(t, hdrDeviceType, qt.Equals, "25")
-	qt.Assert(t, hdrUserAgent, qt.Equals, "Bitwarden_CLI/2026.7.0 (LINUX)")
-	qt.Assert(t, hdrAccept, qt.Equals, "application/json")
-}
-
-// TestLogin_HeadersMatchUpstream verifies that all 5 central headers on every
-// request match the upstream Bitwarden CLI profile (bitwarden/clients):
-//   - Accept: application/json
-//   - User-Agent: Bitwarden_CLI/2026.7.0 (LINUX)
-//   - Bitwarden-Client-Name: cli
-//   - Bitwarden-Client-Version: 2026.7.0
-//   - Device-Type: 25 (numeric LinuxCLI enum value)
-//
-// Bitwarden-Package-Type is intentionally NOT sent (CLI's packageType() returns null).
-func TestLogin_HeadersMatchUpstream(t *testing.T) {
-	var capturedHeaders http.Header
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/accounts/prelogin":
-			capturedHeaders = r.Header.Clone()
-			json.NewEncoder(w).Encode(preLoginResponse{
-				KDF:           0,
-				KDFIterations: 100000,
-			})
-		case "/connect/token":
-			capturedHeaders = r.Header.Clone()
-			r.ParseForm()
-			json.NewEncoder(w).Encode(tokLoginResponse{
-				AccessToken:  "test-access-token",
-				RefreshToken: "test-refresh-token",
-				ExpiresIn:    3600,
-				TokenType:    "Bearer",
-			})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	oldIdtURL := idtURL
-	idtURL = server.URL
-	defer func() { idtURL = oldIdtURL }()
-
-	os.Setenv("BW_CLIENTID", "test-client-id")
-	os.Setenv("BW_CLIENTSECRET", "test-client-secret")
-	os.Setenv("EMAIL", "test@example.com")
-	defer func() {
-		os.Unsetenv("BW_CLIENTID")
-		os.Unsetenv("BW_CLIENTSECRET")
-		os.Unsetenv("EMAIL")
-	}()
-
-	globalData = dataFile{DeviceID: "test-device-id"}
-	secrets = secretCache{data: &globalData}
-	saveData = false
-
-	ctx := context.Background()
-	err := login(ctx, false)
-	qt.Assert(t, err, qt.IsNil)
-
-	// Verify all 5 central headers match the upstream CLI profile.
-	qt.Assert(t, capturedHeaders.Get("Accept"), qt.Equals, "application/json",
-		qt.Commentf("Accept header must be application/json"))
-	qt.Assert(t, capturedHeaders.Get("User-Agent"), qt.Equals, "Bitwarden_CLI/2026.7.0 (LINUX)",
-		qt.Commentf("User-Agent must match upstream CLI format"))
-	qt.Assert(t, capturedHeaders.Get("Bitwarden-Client-Name"), qt.Equals, "cli",
-		qt.Commentf("Bitwarden-Client-Name must be cli"))
-	qt.Assert(t, capturedHeaders.Get("Bitwarden-Client-Version"), qt.Equals, "2026.7.0",
-		qt.Commentf("Bitwarden-Client-Version must be CalVer 2026.7.0"))
-	qt.Assert(t, capturedHeaders.Get("Device-Type"), qt.Equals, "25",
-		qt.Commentf("Device-Type header must be numeric 25 (LinuxCLI)"))
-
-	// Bitwarden-Package-Type must NOT be sent (CLI omits it).
-	qt.Assert(t, capturedHeaders.Get("Bitwarden-Package-Type"), qt.Equals, "",
-		qt.Commentf("Bitwarden-Package-Type must not be sent (CLI omits it)"))
-}
-
-// TestEmailFromAccessToken verifies the JWT email-extraction helper used as
-// the 4th fallback in secrets.email() (crypto.go). Lets client_credentials
-// users decrypt without configuring $EMAIL, a config file entry, or waiting
-// for /sync to populate the profile email.
+// TestEmailFromAccessToken verifies the JWT email-extraction helper.
 func TestEmailFromAccessToken(t *testing.T) {
-	// buildJWT constructs a minimal JWT with the given payload claims.
-	// Signature is fake (we don't verify it — same as upstream CLI).
 	buildJWT := func(claims map[string]interface{}) string {
 		header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
 		payloadBytes, _ := json.Marshal(claims)

@@ -4,21 +4,28 @@
 # Ensure we haven't logged in.
 ! grep AccessToken $CONFIG_DIR/data.json
 
+# Without env vars, interactive login requires a terminal.
 ! bitw login
-stderr 'need a configured email'
+stderr 'interactive login requires a terminal'
 
 # This is a test account with a dummy password, and no two-factor auth set up.
 env EMAIL=testnotfa@mvdan.cc
 
+# Even with email, still need a terminal or FORCE_STDIN_PROMPTS.
 ! bitw login
-stderr 'need a terminal to prompt'
+stderr 'interactive login requires a terminal'
 
 [!env:PASSWORD_NOTFA] skip 'requires $PASSWORD_NOTFA for testnotfa@mvdan.cc'
 
-# Login will work, granted the password is present.
+# Login will work with FORCE_STDIN_PROMPTS and the password in env.
+# The interactive flow always prompts (never reads $PASSWORD directly),
+# so we use FORCE_STDIN_PROMPTS to allow non-TTY prompts.
 
 env PASSWORD=$PASSWORD_NOTFA
-bitw login
+env FORCE_STDIN_PROMPTS=true
+exec bitw login <<EOF
+cloud
+EOF
 
 grep AccessToken $CONFIG_DIR/data.json
 ! grep '"Name": "Test Without TFA",' $CONFIG_DIR/data.json

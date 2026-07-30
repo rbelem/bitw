@@ -352,7 +352,7 @@ func TestLoginSkipsEmailForClientCredentials(t *testing.T) {
 	os.Setenv("BW_CLIENTID", "user.00000000-0000-0000-0000-000000000000")
 	os.Setenv("BW_CLIENTSECRET", "bitw-test-placeholder-not-a-real-secret")
 
-	err := login(context.Background(), false)
+	err := login(context.Background())
 	qt.Check(t, err, qt.IsNotNil,
 		qt.Commentf("expected login() to fail with a network/grant error in the sandbox; got nil"))
 	const topOfFunctionEmailErr = "need a configured email or $EMAIL to log in"

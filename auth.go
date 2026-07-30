@@ -12,12 +12,14 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
 	"golang.org/x/crypto/pbkdf2"
+	"golang.org/x/term"
 )
 
 type preLoginRequest struct {
@@ -130,113 +132,181 @@ func deviceType() string {
 	return strconv.Itoa(deviceTypeNum())
 }
 
-func login(ctx context.Context, retryWithApiKey bool) error {
-	// Try client_credentials first when API key env vars are present,
-	// or when retrying after a captcha. Fall back to password grant
-	// otherwise, or if client_credentials fails.
-	useApiKey := retryWithApiKey || os.Getenv("BW_CLIENTID") != ""
+// passwordPromptFunc and readLineFunc are overridable for tests.
+var (
+	passwordPromptFunc = promptWithAskpass
+	readLineFunc       = readLine
+)
 
-	// Email + /accounts/prelogin are only required for the password grant.
-	// client_credentials is a machine-to-machine OAuth flow that needs
-	// neither (ADR-0003 §Context). Skipping these here lets client_credentials
-	// users log in without configuring $EMAIL or a synced profile email.
-	var email string
-	var preLogin preLoginResponse
-	if !useApiKey {
-		email = secrets.email()
-		if email == "" {
-			return fmt.Errorf("need a configured email or $EMAIL to log in")
-		}
-		if err := jsonPOST(ctx, idtURL+"/accounts/prelogin", &preLogin, preLoginRequest{
-			Email: email,
-		}); err != nil {
-			return fmt.Errorf("could not pre-login: %v", err)
-		}
-		globalData.KDF = KDFType(preLogin.KDF)
-		globalData.KDFIterations = preLogin.KDFIterations
-		globalData.KDFMemory = preLogin.KDFMemory
-		globalData.KDFParallelism = preLogin.KDFParallelism
-		saveData = true
-	}
+const (
+	defaultApiURL = "https://api.bitwarden.com"
+	defaultIdtURL = "https://identity.bitwarden.com"
+)
 
-	var values url.Values
-	var grantErr error
-	if useApiKey {
-		values, grantErr = buildApiKeyGrant()
-	} else {
-		values, grantErr = buildPasswordGrant(email, preLogin)
-	}
-	if grantErr != nil {
-		return grantErr
-	}
+// login is the top-level dispatcher for `bitw login`.
+// Skips everything if BOTH BW_CLIENTID and BW_CLIENTSECRET are set.
+// Otherwise, interactive flow: server selection, email, master password,
+// 2FA (if enabled), libsecret storage.
+func login(ctx context.Context) error {
+	hasId := os.Getenv("BW_CLIENTID") != ""
+	hasSecret := os.Getenv("BW_CLIENTSECRET") != ""
 
-	now := time.Now().UTC()
-	var tokLogin tokLoginResponse
-	err := jsonPOST(ctx, idtURL+"/connect/token", &tokLogin, values)
-	errsc, ok := err.(*errStatusCode)
-	if ok && bytes.Contains(errsc.body, []byte("TwoFactor")) {
-		var twoFactor twoFactorResponse
-		if err := json.Unmarshal(errsc.body, &twoFactor); err != nil {
+	switch {
+	case hasId && hasSecret:
+		return loginApiKey(ctx)
+	case hasId != hasSecret:
+		return fmt.Errorf(
+			"BW_CLIENTID and BW_CLIENTSECRET must both be set or both be empty; "+
+				"got BW_CLIENTID=%t, BW_CLIENTSECRET=%t. "+
+				"Set both for API key login, or unset both for interactive login",
+			hasId, hasSecret)
+	default:
+		return loginInteractive(ctx)
+	}
+}
+
+func loginApiKey(ctx context.Context) error {
+	values, err := buildApiKeyGrant()
+	if err != nil {
+		return err
+	}
+	var tok tokLoginResponse
+	if err := jsonPOST(ctx, idtURL+"/connect/token", &tok, values); err != nil {
+		return fmt.Errorf("client_credentials login failed: %w", err)
+	}
+	storeToken(tok)
+	return nil
+}
+
+func loginInteractive(ctx context.Context) error {
+	// TTY gate
+	if !term.IsTerminal(int(os.Stdin.Fd())) && os.Getenv("FORCE_STDIN_PROMPTS") != "true" {
+		return fmt.Errorf("interactive login requires a terminal (stdin is not a TTY); " +
+			"set BW_CLIENTID + BW_CLIENTSECRET for non-interactive login, " +
+			"or set FORCE_STDIN_PROMPTS=true")
+	}
+	// 1. Server selection
+	if err := selectServer(); err != nil {
+		return err
+	}
+	// 2. Email
+	email := secrets.email()
+	if email == "" {
+		line, err := readLineFunc("Email")
+		if err != nil {
 			return err
 		}
-		provider, token, err := twoFactorPrompt(&twoFactor)
+		email = strings.TrimSpace(string(line))
+		if email == "" {
+			return fmt.Errorf("no email provided")
+		}
+	}
+	// 3. Prelogin → KDF params
+	var preLogin preLoginResponse
+	if err := jsonPOST(ctx, idtURL+"/accounts/prelogin", &preLogin,
+		preLoginRequest{Email: email}); err != nil {
+		return fmt.Errorf("could not pre-login: %w", err)
+	}
+	globalData.KDF = KDFType(preLogin.KDF)
+	globalData.KDFIterations = preLogin.KDFIterations
+	globalData.KDFMemory = preLogin.KDFMemory
+	globalData.KDFParallelism = preLogin.KDFParallelism
+	saveData = true
+	// 4. Master password (always prompted in interactive mode)
+	password, err := passwordPromptFunc("Master password")
+	if err != nil {
+		return err
+	}
+	password = bytes.TrimSpace(password)
+	// 5. Password grant (compute hashed password, send to /connect/token)
+	values, err := buildPasswordGrant(email, preLogin, password)
+	if err != nil {
+		return err
+	}
+	var tok tokLoginResponse
+	err = jsonPOST(ctx, idtURL+"/connect/token", &tok, values)
+	// 6. 2FA handling (reuse existing twoFactorPrompt)
+	if errsc, ok := err.(*errStatusCode); ok && bytes.Contains(errsc.body, []byte("TwoFactor")) {
+		var tf twoFactorResponse
+		if err := json.Unmarshal(errsc.body, &tf); err != nil {
+			return err
+		}
+		provider, token, err := twoFactorPrompt(&tf)
 		if err != nil {
-			return fmt.Errorf("could not obtain two-factor auth token: %v", err)
+			return fmt.Errorf("could not obtain two-factor auth token: %w", err)
 		}
 		values.Set("twoFactorProvider", strconv.Itoa(int(provider)))
 		values.Set("twoFactorToken", string(token))
-		values.Set("twoFactorRemember", "1") // TODO: probably make this configurable
-		tokLogin = tokLoginResponse{}
-		if err := jsonPOST(ctx, idtURL+"/connect/token", &tokLogin, values); err != nil {
-			return fmt.Errorf("could not login via two-factor: %v", err)
+		values.Set("twoFactorRemember", "1")
+		tok = tokLoginResponse{}
+		if err := jsonPOST(ctx, idtURL+"/connect/token", &tok, values); err != nil {
+			return fmt.Errorf("could not login via two-factor: %w", err)
 		}
 	} else if err != nil && strings.Contains(err.Error(), "Captcha required.") {
-		fmt.Fprintln(os.Stderr, "The server presented us with a captcha.")
-		fmt.Fprintln(os.Stderr, "The best way to prevent future captcha is by login at least one time via api-key.")
-		fmt.Fprintln(os.Stderr, "You can read on how to obtain the keys at: https://bitwarden.com/help/personal-api-key/")
-		return login(ctx, true)
+		return fmt.Errorf("server requires captcha; " +
+			"use API key login instead: set BW_CLIENTID and BW_CLIENTSECRET " +
+			"(see https://bitwarden.com/help/personal-api-key/)")
 	} else if err != nil {
-		// If client_credentials was attempted due to env vars (not an
-		// explicit captcha retry), fall back to password grant.
-		if useApiKey && !retryWithApiKey {
-			// Lazily fetch email + preLogin only if we skipped them at
-			// the top (because useApiKey was true). Preserves the
-			// original fallback semantics for users who have an email
-			// configured but whose API key was rejected for a
-			// non-captcha reason (e.g. revoked key).
-			if email == "" {
-				email = secrets.email()
-				if email == "" {
-					return fmt.Errorf("need a configured email or $EMAIL to log in (password fallback)")
-				}
-				if err := jsonPOST(ctx, idtURL+"/accounts/prelogin", &preLogin, preLoginRequest{
-					Email: email,
-				}); err != nil {
-					return fmt.Errorf("could not pre-login (password fallback): %v", err)
-				}
-				globalData.KDF = KDFType(preLogin.KDF)
-				globalData.KDFIterations = preLogin.KDFIterations
-				globalData.KDFMemory = preLogin.KDFMemory
-				globalData.KDFParallelism = preLogin.KDFParallelism
-				saveData = true
-			}
-			values, grantErr = buildPasswordGrant(email, preLogin)
-			if grantErr != nil {
-				return grantErr
-			}
-			tokLogin = tokLoginResponse{}
-			if err := jsonPOST(ctx, idtURL+"/connect/token", &tokLogin, values); err != nil {
-				return fmt.Errorf("could not login via password: %v", err)
-			}
-		} else {
-			return fmt.Errorf("could not login: %v", err)
-		}
+		return fmt.Errorf("could not login: %w", err)
 	}
-	globalData.AccessToken = tokLogin.AccessToken
-	globalData.RefreshToken = tokLogin.RefreshToken
-	globalData.TokenExpiry = now.Add(time.Duration(tokLogin.ExpiresIn) * time.Second)
-	saveData = true
+	storeToken(tok)
+	// 7. Best-effort libsecret storage
+	storePasswordLibsecret(password)
 	return nil
+}
+
+func selectServer() error {
+	if apiURL != defaultApiURL || idtURL != defaultIdtURL {
+		return nil // config file or env already set them
+	}
+	line, err := readLineFunc("Server [cloud/self] (default: cloud)")
+	if err != nil {
+		return err
+	}
+	choice := strings.TrimSpace(strings.ToLower(string(line)))
+	switch choice {
+	case "", "cloud", "c":
+		// defaults already set
+	case "self", "self-hosted", "s":
+		baseLine, err := readLineFunc("Base URL (e.g. https://bw.example.com)")
+		if err != nil {
+			return err
+		}
+		base := strings.TrimRight(strings.TrimSpace(string(baseLine)), "/")
+		if base == "" {
+			return fmt.Errorf("no base URL provided")
+		}
+		apiURL = base + "/api"
+		idtURL = base + "/identity"
+	default:
+		return fmt.Errorf("unknown server choice %q (use cloud or self)", choice)
+	}
+	return nil
+}
+
+func storeToken(tok tokLoginResponse) {
+	globalData.AccessToken = tok.AccessToken
+	globalData.RefreshToken = tok.RefreshToken
+	globalData.TokenExpiry = time.Now().UTC().Add(
+		time.Duration(tok.ExpiresIn) * time.Second)
+	saveData = true
+}
+
+func storePasswordLibsecret(password []byte) {
+	if _, err := exec.LookPath("secret-tool"); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"warning: secret-tool not found; master password not stored in keyring. "+
+				"bitw get will prompt for it.\n")
+		return
+	}
+	cmd := exec.Command("secret-tool", "store",
+		"--label=Bitwarden", "bitwarden", "master-password")
+	cmd.Stdin = bytes.NewReader(append(password, '\n'))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"warning: could not store master password in keyring: %v %s\n",
+			err, bytes.TrimSpace(out))
+	}
 }
 
 func buildApiKeyGrant() (url.Values, error) {
@@ -270,11 +340,7 @@ func buildApiKeyGrant() (url.Values, error) {
 	), nil
 }
 
-func buildPasswordGrant(email string, preLogin preLoginResponse) (url.Values, error) {
-	password, err := secrets.password()
-	if err != nil {
-		return nil, err
-	}
+func buildPasswordGrant(email string, preLogin preLoginResponse, password []byte) (url.Values, error) {
 	masterKey, err := deriveMasterKey(password, email, KDFType(preLogin.KDF), preLogin.KDFIterations, preLogin.KDFMemory, preLogin.KDFParallelism)
 	if err != nil {
 		return nil, err
@@ -356,7 +422,7 @@ func twoFactorPrompt(resp *twoFactorResponse) (TwoFactorProvider, []byte, error)
 			available = append(available, pv)
 			fmt.Fprintf(os.Stderr, "%d) %s\n", len(available), pv.Line(extra))
 		}
-		input, err := readLine(fmt.Sprintf("Select a two-factor auth provider [1-%d]", len(available)))
+		input, err := readLineFunc(fmt.Sprintf("Select a two-factor auth provider [1-%d]", len(available)))
 		if err != nil {
 			return -1, nil, err
 		}
@@ -369,7 +435,7 @@ func twoFactorPrompt(resp *twoFactorResponse) (TwoFactorProvider, []byte, error)
 		}
 		selected = available[i-1]
 	}
-	token, err := passwordPrompt(selected.Line(resp.TwoFactorProviders2[selected]))
+	token, err := passwordPromptFunc(selected.Line(resp.TwoFactorProviders2[selected]))
 	if err != nil {
 		return -1, nil, err
 	}
