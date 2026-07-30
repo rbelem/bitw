@@ -41,6 +41,7 @@ Commands:
 	dump    list all the stored login secrets
 	get     retrieve a cipher's fields (shell-eval or bare output)
 	cache   decrypt ciphers into a shell-sourceable env file
+	create  create a new Login cipher in the personal vault
 	serve   start the org.freedesktop.secrets D-Bus service
 	config  print the current configuration
 	`[1:])
@@ -390,6 +391,10 @@ func run(args ...string) (err error) {
 		}
 	case "cache":
 		if err := cmdCache(ctx, args[1:]); err != nil {
+			return err
+		}
+	case "create":
+		if err := cmdCreate(ctx, args[1:]); err != nil {
 			return err
 		}
 	case "serve":
