@@ -31,6 +31,38 @@ type preLoginResponse struct {
 	KDFParallelism int
 }
 
+// refreshKDF fetches /accounts/prelogin and writes the KDF block to
+// globalData. Non-fatal when a KDF is already cached (a flaky identity
+// endpoint must not break an otherwise-working sync); fatal when no KDF is
+// cached, since decryption is impossible without it.
+//
+// Called from sync() so the KDF block stays in lockstep with the cipher
+// blob fetched by /sync. Without this, client_credentials logins (which
+// skip prelogin per Phase 3a) leave a stale KDF in data.json after any
+// vault re-key, and initKeys derives the wrong symmetric key — producing
+// "decrypt: MAC mismatch" (crypto.go:308) on every get.
+func refreshKDF(ctx context.Context) error {
+	email := secrets.email()
+	if email == "" {
+		// Org-only / pre-profile state: leave any existing KDF untouched.
+		return nil
+	}
+	var preLogin preLoginResponse
+	err := jsonPOST(ctx, idtURL+"/accounts/prelogin", &preLogin, preLoginRequest{Email: email})
+	if err != nil {
+		if globalData.KDFIterations != 0 {
+			fmt.Fprintf(os.Stderr, "warning: could not refresh KDF params: %v\n", err)
+			return nil
+		}
+		return fmt.Errorf("could not pre-login to fetch KDF params: %w", err)
+	}
+	globalData.KDF = KDFType(preLogin.KDF)
+	globalData.KDFIterations = preLogin.KDFIterations
+	globalData.KDFMemory = preLogin.KDFMemory
+	globalData.KDFParallelism = preLogin.KDFParallelism
+	return nil
+}
+
 type tokLoginResponse struct {
 	AccessToken  string `json:"access_token"`
 	ExpiresIn    int    `json:"expires_in"`

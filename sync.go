@@ -289,6 +289,17 @@ func sync(ctx context.Context) error {
 		return fmt.Errorf("could not sync: %v", err)
 	}
 	globalData.LastSync = now
+
+	// Refresh KDF params from /accounts/prelogin so they stay in lockstep
+	// with the just-synced cipher blob. client_credentials logins skip
+	// prelogin (auth.go:116 `if !useApiKey` guard), so without this the
+	// KDF block goes stale after a vault re-key and decrypt fails with
+	// "MAC mismatch" (crypto.go:308). Email is now available from the
+	// synced profile (crypto.go:66).
+	if err := refreshKDF(ctx); err != nil {
+		return err
+	}
+
 	saveData = true
 	return nil
 }
