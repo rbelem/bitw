@@ -67,6 +67,18 @@ func cmdCache(ctx context.Context, args []string) error {
 		return fmt.Errorf("could not load manifest %s: %w", configPath, err)
 	}
 
+	// Ensure we have a fresh access token and a freshly synced vault. Without
+	// sync, the cipherIndex below would only see ciphers present in data.json
+	// at startup — missing any created since (via `bitw create` or the web UI).
+	// This makes `bitw cache` a true drop-in for the bash bin/secrets-refresh
+	// wrapper (which did `bitw sync` as a preflight before its per-item loop).
+	if err := ensureToken(ctx); err != nil {
+		return err
+	}
+	if err := sync(ctx); err != nil {
+		return err
+	}
+
 	// Unlock vault (derive master key via Argon2id/PBKDF2 — once).
 	if _, err := secrets.password(); err != nil {
 		return err

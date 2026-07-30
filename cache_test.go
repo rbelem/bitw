@@ -6,22 +6,33 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	qt "github.com/frankban/quicktest"
 )
 
 // setupCacheTest initializes globalData and secrets with a working vault
-// (known master key derived from localTestPassword/localTestEmail). Returns
-// a temp directory for manifest and output files.
+// (known master key derived from localTestPassword/localTestEmail). It also
+// installs a mock /sync endpoint that returns whatever ciphers are currently
+// set in globalData.Sync.Ciphers, so cmdCache's preflight sync (added so
+// `bitw cache` can fully replace bin/secrets-refresh) preserves the test
+// fixtures. Returns a temp directory for manifest and output files.
 func setupCacheTest(t *testing.T) string {
 	t.Helper()
 	globalData = dataFile{
-		KDFIterations: 100000,
+		KDFIterations:  100000,
+		AccessToken:    "test-token",
+		TokenExpiry:    time.Now().Add(time.Hour),
+		KDFMemory:      64,
+		KDFParallelism: 4,
 	}
 	globalData.Sync.Profile.Email = localTestEmail
 	globalData.Sync.Profile.Key.UnmarshalText([]byte(localTestKey2))
@@ -30,6 +41,35 @@ func setupCacheTest(t *testing.T) string {
 		_password: []byte(localTestPassword),
 	}
 	saveData = false
+
+	// Mock server: /sync echoes the current globalData.Sync (so tests can
+	// keep setting ciphers directly). /accounts/prelogin returns a stable
+	// KDF block so refreshKDF inside sync() doesn't 404.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sync":
+			_ = json.NewEncoder(w).Encode(SyncData{
+				Profile: globalData.Sync.Profile,
+				Ciphers: globalData.Sync.Ciphers,
+			})
+		case "/accounts/prelogin":
+			_ = json.NewEncoder(w).Encode(preLoginResponse{
+				KDF:            1,
+				KDFIterations:  globalData.KDFIterations,
+				KDFMemory:      globalData.KDFMemory,
+				KDFParallelism: globalData.KDFParallelism,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	oldApi, oldIdt := apiURL, idtURL
+	apiURL, idtURL = server.URL, server.URL
+	t.Cleanup(func() {
+		apiURL, idtURL = oldApi, oldIdt
+		server.Close()
+	})
+
 	// Derive keys eagerly so test data encryption matches what cmdCache sees.
 	if err := secrets.initKeys(); err != nil {
 		t.Fatalf("initKeys: %v", err)
@@ -489,4 +529,74 @@ bw-key = BW_CLIENTSECRET
 		qt.Commentf("secret-tool args: %q", argsStr))
 	qt.Assert(t, strings.Contains(argsStr, "BW_CLIENTSECRET"), qt.IsTrue,
 		qt.Commentf("secret-tool args: %q", argsStr))
+}
+
+// TestCache_CallsSync is the regression guard for the sync preflight added
+// so `bitw cache` can fully replace the bash bin/secrets-refresh wrapper
+// (which did `bitw sync` as a preflight before its per-item loop). Without
+// this, cmdCache would only see ciphers present in data.json at startup and
+// miss any created since — including items just created by `bitw create`.
+//
+// The test verifies two things:
+//  1. cmdCache calls /sync before reading cipher data.
+//  2. Ciphers returned by the live /sync response are visible to cmdCache —
+//     even when they were not in globalData.Sync.Ciphers at the moment of
+//     invocation. This guards against cmdCache accidentally using stale
+//     in-memory data instead of the freshly synced server state.
+func TestCache_CallsSync(t *testing.T) {
+	// Build a /sync response that includes a fresh cipher the test did NOT
+	// pre-populate into globalData.Sync.Ciphers. If cmdCache trusts the
+	// in-memory ciphers over /sync, this cipher is missed; if it syncs
+	// first, it is picked up.
+	dir := setupCacheTest(t)
+
+	var syncCalled bool
+	synced := testCipher(t, "synced-only-cipher", "synced-secret")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sync":
+			syncCalled = true
+			_ = json.NewEncoder(w).Encode(SyncData{
+				Profile: globalData.Sync.Profile,
+				Ciphers: []Cipher{synced},
+			})
+		case "/accounts/prelogin":
+			_ = json.NewEncoder(w).Encode(preLoginResponse{
+				KDF:            1,
+				KDFIterations:  globalData.KDFIterations,
+				KDFMemory:      globalData.KDFMemory,
+				KDFParallelism: globalData.KDFParallelism,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	oldApi, oldIdt := apiURL, idtURL
+	apiURL, idtURL = server.URL, server.URL
+	defer func() { apiURL, idtURL = oldApi, oldIdt }()
+
+	// Wipe any pre-populated ciphers: cmdCache must re-fetch via /sync.
+	globalData.Sync.Ciphers = nil
+
+	manifest := writeManifest(t, dir, `
+[cache]
+synced-only-cipher = SYNCED_VAR
+`)
+	output := filepath.Join(dir, "out.sh")
+
+	captureStderr(t, func() {
+		err := cmdCache(context.Background(), []string{
+			"-config", manifest,
+			"-output", output,
+		})
+		qt.Assert(t, err, qt.IsNil)
+	})
+
+	qt.Assert(t, syncCalled, qt.IsTrue, qt.Commentf("cmdCache must call /sync before reading ciphers"))
+
+	content, err := os.ReadFile(output)
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, strings.Contains(string(content), "export SYNCED_VAR='synced-secret'"), qt.IsTrue,
+		qt.Commentf("cipher from /sync response must be resolved; cache file: %q", string(content)))
 }
