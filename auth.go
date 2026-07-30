@@ -178,6 +178,23 @@ func loginApiKey(ctx context.Context) error {
 	return nil
 }
 
+// passwordPromptInteractive prompts for a password, checking libsecret first.
+// Used by the interactive login flow where clear feedback about the password
+// source is important — the user needs to know whether they're being prompted
+// or whether the password is being read silently from the keyring (e.g.,
+// stored by a prior `bitw login` or by secrets-setup).
+//
+// If libsecret has a stored password, returns it with a stderr note. If not,
+// falls through to passwordPromptFunc (the overridable var, defaulting to
+// promptWithAskpass — the GUI / SSH_ASKPASS / terminal priority chain).
+func passwordPromptInteractive(prompt string) ([]byte, error) {
+	if pw, err := readLibsecretPassword(); err == nil && len(pw) > 0 {
+		fmt.Fprintln(os.Stderr, "(using stored master password from libsecret)")
+		return pw, nil
+	}
+	return passwordPromptFunc(prompt)
+}
+
 func loginInteractive(ctx context.Context) error {
 	// TTY gate
 	if !term.IsTerminal(int(os.Stdin.Fd())) && os.Getenv("FORCE_STDIN_PROMPTS") != "true" {
@@ -186,13 +203,15 @@ func loginInteractive(ctx context.Context) error {
 			"or set FORCE_STDIN_PROMPTS=true")
 	}
 	// 1. Server selection
+	fmt.Fprintln(os.Stderr, "[1/4] Server selection (cloud or self-hosted)")
 	if err := selectServer(); err != nil {
 		return err
 	}
 	// 2. Email
+	fmt.Fprintln(os.Stderr, "[2/4] Bitwarden account email")
 	email := secrets.email()
 	if email == "" {
-		line, err := readLineFunc("Email")
+		line, err := readLineFunc("Bitwarden account email: ")
 		if err != nil {
 			return err
 		}
@@ -212,8 +231,9 @@ func loginInteractive(ctx context.Context) error {
 	globalData.KDFMemory = preLogin.KDFMemory
 	globalData.KDFParallelism = preLogin.KDFParallelism
 	saveData = true
-	// 4. Master password (always prompted in interactive mode)
-	password, err := passwordPromptFunc("Master password")
+	// 4. Master password (libsecret first if present, otherwise prompted)
+	fmt.Fprintln(os.Stderr, "[3/4] Master password")
+	password, err := passwordPromptInteractive("Master password: ")
 	if err != nil {
 		return err
 	}
@@ -231,6 +251,7 @@ func loginInteractive(ctx context.Context) error {
 		if err := json.Unmarshal(errsc.body, &tf); err != nil {
 			return err
 		}
+		fmt.Fprintln(os.Stderr, "[4/4] Two-factor authentication (TOTP / email / etc.)")
 		provider, token, err := twoFactorPrompt(&tf)
 		if err != nil {
 			return fmt.Errorf("could not obtain two-factor auth token: %w", err)
@@ -435,7 +456,10 @@ func twoFactorPrompt(resp *twoFactorResponse) (TwoFactorProvider, []byte, error)
 		}
 		selected = available[i-1]
 	}
-	token, err := passwordPromptFunc(selected.Line(resp.TwoFactorProviders2[selected]))
+	// Make the prompt explicit: the user must know this is the 2FA code,
+	// not the master password (which was already asked in step 3).
+	tokenLabel := fmt.Sprintf("Two-factor code (%s)", selected.Line(resp.TwoFactorProviders2[selected]))
+	token, err := passwordPromptFunc(tokenLabel)
 	if err != nil {
 		return -1, nil, err
 	}

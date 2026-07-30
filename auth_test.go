@@ -362,7 +362,7 @@ func TestLogin_Interactive_EmailPrompt(t *testing.T) {
 
 	var emailPromptCalled bool
 	readLineFunc = func(prompt string) ([]byte, error) {
-		if strings.Contains(prompt, "Email") {
+		if strings.Contains(prompt, "email") {
 			emailPromptCalled = true
 			return []byte("prompted@example.com"), nil
 		}
