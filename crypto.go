@@ -312,6 +312,84 @@ func (c *secretCache) decrypt(s CipherString, orgID *uuid.UUID) ([]byte, error) 
 	}
 }
 
+// baseKeyFor returns the (encKey, macKey) pair for a cipher's base key:
+// the org key if the cipher belongs to an organization, or the vault key
+// otherwise. This is the key that encrypts cipher.Key itself.
+func (c *secretCache) baseKeyFor(cipher *Cipher) (encKey, macKey []byte) {
+	if cipher.OrganizationID != nil {
+		return c.orgKeys[cipher.OrganizationID.String()], c.orgMacKeys[cipher.OrganizationID.String()]
+	}
+	return c.key, c.macKey
+}
+
+// itemKeyFor decrypts cipher.Key (if non-zero) with the base key and returns
+// the 64-byte item key (first 32 = enc, last 32 = mac). If cipher.Key is
+// zero, it returns nil, nil — the caller should fall back to the base key.
+func (c *secretCache) itemKeyFor(cipher *Cipher) ([]byte, error) {
+	if cipher.Key.IsZero() {
+		return nil, nil
+	}
+	baseEnc, baseMac := c.baseKeyFor(cipher)
+	itemKey, err := decryptWith(cipher.Key, baseEnc, baseMac)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt item key: %w", err)
+	}
+	if len(itemKey) != 64 {
+		return nil, fmt.Errorf("invalid item key length: %d", len(itemKey))
+	}
+	return itemKey, nil
+}
+
+// decryptField decrypts a cipher string field using the cipher's item key
+// if present, or the base (vault/org) key otherwise. This is the
+// per-item-key decryption path that matches the Bitwarden Rust CLI 2026.6.0
+// wire format: cipher.Key is a 64-byte random key encrypted with the base
+// key, and all cipher fields are encrypted with that item key.
+func (c *secretCache) decryptField(cipher *Cipher, s CipherString) ([]byte, error) {
+	if s.IsZero() {
+		return nil, nil
+	}
+	if err := c.initKeys(); err != nil {
+		return nil, err
+	}
+	itemKey, err := c.itemKeyFor(cipher)
+	if err != nil {
+		return nil, err
+	}
+	if itemKey != nil {
+		return decryptWith(s, itemKey[:32], itemKey[32:64])
+	}
+	baseEnc, baseMac := c.baseKeyFor(cipher)
+	return decryptWith(s, baseEnc, baseMac)
+}
+
+// decryptFieldStr is the string-returning variant of decryptField.
+func (c *secretCache) decryptFieldStr(cipher *Cipher, s CipherString) (string, error) {
+	dec, err := c.decryptField(cipher, s)
+	if err != nil {
+		return "", err
+	}
+	return string(dec), nil
+}
+
+// encryptFieldWith encrypts data with the cipher's item key if present,
+// or the base key otherwise. Used by edit to re-encrypt fields while
+// preserving the existing item key.
+func (c *secretCache) encryptFieldWith(cipher *Cipher, data []byte) (CipherString, error) {
+	if len(data) == 0 {
+		return CipherString{}, nil
+	}
+	itemKey, err := c.itemKeyFor(cipher)
+	if err != nil {
+		return CipherString{}, err
+	}
+	if itemKey != nil {
+		return encryptWith(data, AesCbc256_HmacSha256_B64, itemKey[:32], itemKey[32:64])
+	}
+	baseEnc, baseMac := c.baseKeyFor(cipher)
+	return encryptWith(data, AesCbc256_HmacSha256_B64, baseEnc, baseMac)
+}
+
 func decryptWith(s CipherString, key, macKey []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {

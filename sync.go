@@ -172,6 +172,7 @@ type Cipher struct {
 	Type         CipherType
 	ID           uuid.UUID
 	Name         CipherString
+	Key          CipherString
 	Edit         bool
 	RevisionDate time.Time
 
@@ -190,6 +191,7 @@ type Cipher struct {
 	Login      *Login        `json:",omitempty"`
 	Notes      *CipherString `json:",omitempty"`
 	SecureNote *SecureNote   `json:",omitempty"`
+	SshKey     *SshKey       `json:",omitempty"`
 }
 
 type CipherType int
@@ -197,9 +199,10 @@ type CipherType int
 const (
 	_ CipherType = iota
 	CipherLogin
+	CipherNote
 	CipherCard
 	CipherIdentity
-	CipherNote
+	CipherSshKey
 )
 
 type Card struct {
@@ -241,9 +244,12 @@ func (c *Cipher) Match(attr, value string) bool {
 	case "id":
 		got = c.ID.String()
 	case "name":
-		got, err = secrets.decryptStr(c.Name, c.OrganizationID)
+		got, err = secrets.decryptFieldStr(c, c.Name)
 	case "username":
-		got, err = secrets.decryptStr(c.Login.Username, c.OrganizationID)
+		if c.Login == nil {
+			return false
+		}
+		got, err = secrets.decryptFieldStr(c, c.Login.Username)
 	default:
 		return false
 	}
@@ -282,6 +288,11 @@ type SecureNote struct {
 }
 
 type SecureNoteType int
+
+type SshKey struct {
+	PrivateKey CipherString
+	PublicKey  CipherString
+}
 
 func sync(ctx context.Context) error {
 	now := time.Now().UTC()
