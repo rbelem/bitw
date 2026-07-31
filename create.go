@@ -7,6 +7,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 )
@@ -14,7 +15,7 @@ import (
 // cmdCreate creates a new Login-type cipher in the personal vault.
 // Usage:
 //
-//	bitw create <cipher-name> [--notes NOTES] [--field NAME=VALUE]...
+//	bitw create <cipher-name> [--notes NOTES] [--field NAME=VALUE]... [--password-stdin]
 //
 // PERSONAL VAULT ONLY — org-cipher creation (which requires RSA-OAEP
 // encryption of the org key) is not implemented yet. If the same name
@@ -23,7 +24,8 @@ import (
 //
 // The secret value (login.password) is prompted for interactively via the
 // standard zenity / kdialog / SSH_ASKPASS / tty priority chain
-// (see promptWithAskpass in auth.go).
+// (see promptWithAskpass in auth.go), or read from stdin with
+// --password-stdin (no echo; scriptable: `key | bitw create --password-stdin NAME`).
 //
 // Refuses to create a cipher whose name already exists; rotate existing
 // items via `bw edit item <id>` instead. The script re-syncs after a
@@ -33,13 +35,15 @@ func cmdCreate(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("create", flag.ContinueOnError)
 	var notes string
 	var fields stringSliceFlag
+	var stdinPassword bool
 	fs.StringVar(&notes, "notes", "", "notes for the cipher")
 	fs.Var(&fields, "field", "custom field NAME=VALUE (repeatable)")
+	fs.BoolVar(&stdinPassword, "password-stdin", false, "read the secret value from stdin instead of prompting")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: bitw create [--notes NOTES] [--field NAME=VALUE]... <cipher-name> (personal vault only)")
+		return fmt.Errorf("usage: bitw create [--notes NOTES] [--field NAME=VALUE]... [--password-stdin] <cipher-name> (personal vault only)")
 	}
 	cipherName := fs.Arg(0)
 
@@ -67,13 +71,24 @@ func cmdCreate(ctx context.Context, args []string) error {
 		return fmt.Errorf("cipher %q already exists; use `bw edit item <id>` to rotate", cipherName)
 	}
 
-	// Prompt for the secret value (hidden). Same priority chain as the
-	// master password prompt, except we never read the secret from libsecret:
-	// a stored secret in keyring would defeat the point of putting it in BW.
-	prompt := fmt.Sprintf("Secret value for %q", cipherName)
-	secret, err := passwordPromptFunc(prompt)
-	if err != nil {
-		return fmt.Errorf("could not obtain secret: %w", err)
+	// Obtain the secret value: read from stdin with --password-stdin (no
+	// echo, safe for scripts), otherwise prompt via the same zenity >
+	// kdialog > SSH_ASKPASS > tty chain as the master password. Never read
+	// the secret from libsecret: a stored secret in keyring would defeat
+	// the point of putting it in BW.
+	var secret []byte
+	var err error
+	if stdinPassword {
+		secret, err = stdinReadAll()
+		if err != nil {
+			return fmt.Errorf("could not read secret from stdin: %w", err)
+		}
+	} else {
+		prompt := fmt.Sprintf("Secret value for %q", cipherName)
+		secret, err = passwordPromptFunc(prompt)
+		if err != nil {
+			return fmt.Errorf("could not obtain secret: %w", err)
+		}
 	}
 	secret = bytesTrimNewline(secret)
 	if len(secret) == 0 {
@@ -116,6 +131,9 @@ type fieldPair struct {
 	name  string
 	value string
 }
+
+// stdinReadAll reads the whole of stdin and is overridable for tests.
+var stdinReadAll = func() ([]byte, error) { return io.ReadAll(os.Stdin) }
 
 // buildLoginCipher constructs a /ciphers/create request body for a personal
 // Login cipher. organizationId is intentionally omitted (personal vault).

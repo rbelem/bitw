@@ -289,6 +289,57 @@ func TestCmdCreate_EmptySecret(t *testing.T) {
 	qt.Assert(t, createdBody, qt.IsNil)
 }
 
+// TestCmdCreate_PasswordStdin verifies that --password-stdin reads the
+// secret from stdin (no interactive prompt), trims the trailing newline,
+// and encrypts it into login.password.
+func TestCmdCreate_PasswordStdin(t *testing.T) {
+	setupCacheTest(t)
+	globalData.AccessToken = "test-token"
+	globalData.TokenExpiry = futureTime()
+
+	// The prompt chain must not be used when --password-stdin is set.
+	oldPrompt := passwordPromptFunc
+	passwordPromptFunc = func(string) ([]byte, error) {
+		t.Fatal("passwordPromptFunc must not be called with --password-stdin")
+		return nil, nil
+	}
+	t.Cleanup(func() { passwordPromptFunc = oldPrompt })
+
+	oldStdin := stdinReadAll
+	stdinReadAll = func() ([]byte, error) { return []byte("stdin-secret\n"), nil }
+	t.Cleanup(func() { stdinReadAll = oldStdin })
+
+	var createdBody []byte
+	server := mockCreateServer(t, nil, &createdBody, Cipher{
+		ID:   uuid.New(),
+		Type: CipherLogin,
+		Name: encryptStr(t, "devbox-global/deepseek-api-key"),
+	})
+	defer server.Close()
+
+	stderr := captureStderr(t, func() {
+		err := cmdCreate(context.Background(), []string{"--password-stdin", "devbox-global/deepseek-api-key"})
+		qt.Assert(t, err, qt.IsNil)
+	})
+	qt.Assert(t, strings.Contains(stderr, "Created devbox-global/deepseek-api-key"), qt.IsTrue)
+
+	// The piped secret must be encrypted into login.password (with the
+	// trailing newline trimmed), never sent in plaintext.
+	var parsed map[string]interface{}
+	qt.Assert(t, json.Unmarshal(createdBody, &parsed), qt.IsNil)
+	cipherMap, ok := parsed["cipher"].(map[string]interface{})
+	qt.Assert(t, ok, qt.IsTrue)
+	loginMap, ok := cipherMap["login"].(map[string]interface{})
+	qt.Assert(t, ok, qt.IsTrue)
+	pwStr, ok := loginMap["password"].(string)
+	qt.Assert(t, ok, qt.IsTrue)
+	qt.Assert(t, strings.Contains(pwStr, "stdin-secret"), qt.IsFalse,
+		qt.Commentf("password must be encrypted, got: %q", pwStr))
+	var cs CipherString
+	qt.Assert(t, cs.UnmarshalText([]byte(pwStr)), qt.IsNil)
+	qt.Assert(t, decryptFieldStr(t, cs, "password"), qt.Equals, "stdin-secret")
+}
+
 // futureTime returns a time well in the future so ensureToken() sees the
 // cached access token as still valid and skips re-auth.
 func futureTime() time.Time {
