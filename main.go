@@ -233,24 +233,24 @@ func (f *dataFile) Save() error {
 	return ioutil.WriteFile(f.path, bs, 0o600)
 }
 
-func run(args ...string) (err error) {
-	if len(args) == 0 {
-		flagSet.Usage()
-		return flag.ErrHelp
-	}
-	switch args[0] {
-	case "help":
-		// TODO: per-command help
-		flagSet.Usage()
-		return flag.ErrHelp
-	}
+// resolveConfigDir returns the bitw config directory: $CONFIG_DIR if set,
+// else os.UserConfigDir()/bitw.
+func resolveConfigDir() (string, error) {
 	dir := os.Getenv("CONFIG_DIR")
 	if dir == "" {
+		var err error
 		if dir, err = os.UserConfigDir(); err != nil {
-			return err
+			return "", err
 		}
 		dir = filepath.Join(dir, "bitw")
 	}
+	return dir, nil
+}
+
+// loadConfig reads <dir>/config into the global `config` and applies
+// email/apiurl/identityurl keys; errors on sections or unknown keys.
+func loadConfig(dir string) error {
+	var err error
 	config, err = ini.LoadFile(filepath.Join(dir, "config"))
 	if err != nil {
 		return err
@@ -273,33 +273,107 @@ func run(args ...string) (err error) {
 			}
 		}
 	}
+	return nil
+}
 
-	dataPath := filepath.Join(dir, "data.json")
-	if err := loadDataFile(dataPath); err != nil {
-		return fmt.Errorf("could not load %s: %v", dataPath, err)
+// cmdDump prints all login ciphers as TSV.
+func cmdDump(ctx context.Context) error {
+	// Make sure we have the password before printing anything.
+	if _, err := secrets.password(); err != nil {
+		return err
 	}
 
-	if args[0] == "config" {
-		fmt.Printf("email       = %q\n", secrets.email())
-		fmt.Printf("apiURL      = %q\n", apiURL)
-		fmt.Printf("identityURL = %q\n", idtURL)
-		return nil
-	}
-
-	defer func() {
-		if !saveData {
-			return
+	// Split the ciphers into categories, for printing.
+	// Don't use text/tabwriter, as deciphering hundreds can be slow.
+	// TODO: print non-login ciphers too, such as cards.
+	// TODO: use encoding/csv instead.
+	var logins []*Cipher
+	for i := range globalData.Sync.Ciphers {
+		cipher := &globalData.Sync.Ciphers[i]
+		if cipher.Login != nil {
+			logins = append(logins, cipher)
 		}
-		if err1 := globalData.Save(); err == nil {
-			err = err1
-		}
-	}()
-
-	if globalData.DeviceID == "" {
-		globalData.DeviceID = uuid.New().String()
-		saveData = true
 	}
+	fmt.Println("# Logins:")
+	fmt.Println("name\turi\tusername\tpassword")
+	for _, cipher := range logins {
+		if ctx.Err() != nil {
+			break // cancelled
+		}
+		for i, cipherStr := range [...]CipherString{
+			cipher.Name,
+			cipher.Login.URI,
+			cipher.Login.Username,
+			cipher.Login.Password,
+		} {
+			if cipherStr.IsZero() {
+				continue
+			}
 
+			var s []byte
+			var err error
+
+			s, err = secrets.decrypt(cipherStr, cipher.OrganizationID)
+
+			if err != nil {
+				return err
+			}
+			if i > 0 && len(s) > 0 {
+				fmt.Printf("\t")
+			}
+			fmt.Printf("%s", s)
+		}
+		fmt.Println()
+	}
+	return nil
+}
+
+// dispatch runs the named subcommand.
+func dispatch(ctx context.Context, args []string) error {
+	switch args[0] {
+	case "login":
+		if err := login(ctx); err != nil {
+			return err
+		}
+	case "sync":
+		if err := ensureToken(ctx); err != nil {
+			return err
+		}
+		if err := sync(ctx); err != nil {
+			return err
+		}
+	case "dump":
+		if err := cmdDump(ctx); err != nil {
+			return err
+		}
+	case "get":
+		if err := cmdGet(ctx, args[1:]); err != nil {
+			return err
+		}
+	case "cache":
+		if err := cmdCache(ctx, args[1:]); err != nil {
+			return err
+		}
+	case "create":
+		if err := cmdCreate(ctx, args[1:]); err != nil {
+			return err
+		}
+	case "status":
+		if err := cmdStatus(ctx, args[1:]); err != nil {
+			return err
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "unknown command: %q\n", args[0])
+		flagSet.Usage()
+		return flag.ErrHelp
+	}
+	return nil
+}
+
+// setupSignalContext returns a context cancelled on SIGINT; the handler
+// goroutine restores the terminal and exits. THIS FUNCTION BEARS os.Exit
+// AND IS THE SACRIFICIAL 0%.
+func setupSignalContext() context.Context {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt)
 
@@ -329,88 +403,56 @@ func run(args ...string) (err error) {
 		os.Exit(0)
 	}()
 
-	switch args[0] {
-	case "login":
-		if err := login(ctx); err != nil {
-			return err
-		}
-	case "sync":
-		if err := ensureToken(ctx); err != nil {
-			return err
-		}
-		if err := sync(ctx); err != nil {
-			return err
-		}
-	case "dump":
-		// Make sure we have the password before printing anything.
-		if _, err := secrets.password(); err != nil {
-			return err
-		}
+	return ctx
+}
 
-		// Split the ciphers into categories, for printing.
-		// Don't use text/tabwriter, as deciphering hundreds can be slow.
-		// TODO: print non-login ciphers too, such as cards.
-		// TODO: use encoding/csv instead.
-		var logins []*Cipher
-		for i := range globalData.Sync.Ciphers {
-			cipher := &globalData.Sync.Ciphers[i]
-			if cipher.Login != nil {
-				logins = append(logins, cipher)
-			}
-		}
-		fmt.Println("# Logins:")
-		fmt.Println("name\turi\tusername\tpassword")
-		for _, cipher := range logins {
-			if ctx.Err() != nil {
-				break // cancelled
-			}
-			for i, cipherStr := range [...]CipherString{
-				cipher.Name,
-				cipher.Login.URI,
-				cipher.Login.Username,
-				cipher.Login.Password,
-			} {
-				if cipherStr.IsZero() {
-					continue
-				}
-
-				var s []byte
-				var err error
-
-				s, err = secrets.decrypt(cipherStr, cipher.OrganizationID)
-
-				if err != nil {
-					return err
-				}
-				if i > 0 && len(s) > 0 {
-					fmt.Printf("\t")
-				}
-				fmt.Printf("%s", s)
-			}
-			fmt.Println()
-		}
-	case "get":
-		if err := cmdGet(ctx, args[1:]); err != nil {
-			return err
-		}
-	case "cache":
-		if err := cmdCache(ctx, args[1:]); err != nil {
-			return err
-		}
-	case "create":
-		if err := cmdCreate(ctx, args[1:]); err != nil {
-			return err
-		}
-	case "status":
-		if err := cmdStatus(ctx, args[1:]); err != nil {
-			return err
-		}
-	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %q\n", args[0])
+func run(args ...string) (err error) {
+	if len(args) == 0 {
 		flagSet.Usage()
 		return flag.ErrHelp
 	}
-	return nil
+	switch args[0] {
+	case "help":
+		// TODO: per-command help
+		flagSet.Usage()
+		return flag.ErrHelp
+	}
+	dir, err := resolveConfigDir()
+	if err != nil {
+		return err
+	}
+	if err := loadConfig(dir); err != nil {
+		return err
+	}
+
+	dataPath := filepath.Join(dir, "data.json")
+	if err := loadDataFile(dataPath); err != nil {
+		return fmt.Errorf("could not load %s: %v", dataPath, err)
+	}
+
+	if args[0] == "config" {
+		fmt.Printf("email       = %q\n", secrets.email())
+		fmt.Printf("apiURL      = %q\n", apiURL)
+		fmt.Printf("identityURL = %q\n", idtURL)
+		return nil
+	}
+
+	defer func() {
+		if !saveData {
+			return
+		}
+		if err1 := globalData.Save(); err == nil {
+			err = err1
+		}
+	}()
+
+	if globalData.DeviceID == "" {
+		globalData.DeviceID = uuid.New().String()
+		saveData = true
+	}
+
+	ctx := setupSignalContext()
+	return dispatch(ctx, args)
 }
 
 func ensureToken(ctx context.Context) error {
