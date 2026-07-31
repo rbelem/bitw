@@ -4,12 +4,18 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha1"
+	"crypto/x509"
+	"encoding/base64"
 	"fmt"
 	"math/big"
 	"os"
 	"testing"
 
 	qt "github.com/frankban/quicktest"
+	"github.com/google/uuid"
 )
 
 // TestPassword_LibsecretBranch verifies that password() checks libsecret
@@ -318,9 +324,9 @@ func TestInitKeys_InvalidKeyLength(t *testing.T) {
 	t.Skip("Cannot easily trigger invalid key length without corrupting key derivation")
 }
 
-// TestDecrypt_OrgKey verifies that decrypt() uses orgKeys when orgID is
-// provided (crypto.go:308-309).
-func TestDecrypt_OrgKey(t *testing.T) {
+// TestDecrypt_PersonalKey verifies that decrypt() uses the personal key when
+// orgID is nil (crypto.go:310-311).
+func TestDecrypt_PersonalKey(t *testing.T) {
 	origSecrets := secrets
 	origEmail := os.Getenv("EMAIL")
 	t.Cleanup(func() {
@@ -610,4 +616,264 @@ func TestPassword_LibsecretHit(t *testing.T) {
 	qt.Assert(t, fake.calls[0], qt.DeepEquals, []string{
 		"secret-tool", "lookup", "bitwarden", "master-password",
 	})
+}
+
+// TestInitKeys_UnsupportedKeyCipherType verifies that initKeys() returns an
+// error when Profile.Key.Type is not 0 or 2 (crypto.go:175-176).
+func TestInitKeys_UnsupportedKeyCipherType(t *testing.T) {
+	origSecrets := secrets
+	origEmail := os.Getenv("EMAIL")
+	t.Cleanup(func() {
+		secrets = origSecrets
+		os.Setenv("EMAIL", origEmail)
+	})
+
+	os.Setenv("EMAIL", localTestEmail)
+	secrets = secretCache{
+		_password: []byte(localTestPassword),
+		data: &dataFile{
+			KDFIterations: 100000,
+		},
+	}
+	secrets.data.Sync.Profile.Email = localTestEmail
+	secrets.data.Sync.Profile.Key.UnmarshalText([]byte(localTestKey2))
+	// Mutate to an unsupported cipher type
+	secrets.data.Sync.Profile.Key.Type = CipherStringType(99)
+
+	err := secrets.initKeys()
+	qt.Assert(t, err, qt.ErrorMatches, "unsupported key cipher type.*")
+}
+
+// TestInitKeys_RSAPrivateKey verifies that initKeys() parses the RSA private
+// key from Profile.PrivateKey when present (crypto.go:234-245).
+func TestInitKeys_RSAPrivateKey(t *testing.T) {
+	origSecrets := secrets
+	origEmail := os.Getenv("EMAIL")
+	t.Cleanup(func() {
+		secrets = origSecrets
+		os.Setenv("EMAIL", origEmail)
+	})
+
+	os.Setenv("EMAIL", localTestEmail)
+	secrets = secretCache{
+		_password: []byte(localTestPassword),
+		data: &dataFile{
+			KDFIterations: 100000,
+		},
+	}
+	secrets.data.Sync.Profile.Email = localTestEmail
+	secrets.data.Sync.Profile.Key.UnmarshalText([]byte(localTestKey2))
+
+	// Initialize keys first so we can encrypt the private key
+	if err := secrets.initKeys(); err != nil {
+		t.Fatalf("initKeys: %v", err)
+	}
+
+	// Generate a real RSA private key
+	pkey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey: %v", err)
+	}
+
+	// Marshal to PKCS8
+	pkcs8Key, err := x509.MarshalPKCS8PrivateKey(pkey)
+	if err != nil {
+		t.Fatalf("MarshalPKCS8PrivateKey: %v", err)
+	}
+
+	// Encrypt the marshaled key with the user's symmetric key
+	encryptedKey, err := secrets.encrypt(pkcs8Key)
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+
+	// Reset secrets and set the encrypted private key
+	secrets.key = nil
+	secrets.macKey = nil
+	secrets.privateKey = nil
+	secrets.data.Sync.Profile.PrivateKey = encryptedKey
+
+	// Call initKeys again — it should parse the RSA private key
+	if err := secrets.initKeys(); err != nil {
+		t.Fatalf("initKeys with PrivateKey: %v", err)
+	}
+
+	// Assert the private key was parsed and matches
+	qt.Assert(t, secrets.privateKey, qt.IsNotNil)
+	qt.Assert(t, secrets.privateKey.D.Cmp(pkey.D), qt.Equals, 0)
+	qt.Assert(t, secrets.orgKeys, qt.IsNotNil)
+	qt.Assert(t, secrets.orgMacKeys, qt.IsNotNil)
+}
+
+// TestDecrypt_OrgKey verifies that decrypt() uses orgKeys when orgID is
+// provided (crypto.go:308-309). This test covers the org-key branch by
+// manually populating orgKeys and orgMacKeys.
+func TestDecrypt_OrgKey(t *testing.T) {
+	origSecrets := secrets
+	origEmail := os.Getenv("EMAIL")
+	t.Cleanup(func() {
+		secrets = origSecrets
+		os.Setenv("EMAIL", origEmail)
+	})
+
+	os.Setenv("EMAIL", localTestEmail)
+	secrets = secretCache{
+		_password: []byte(localTestPassword),
+		data: &dataFile{
+			KDFIterations: 100000,
+		},
+	}
+	secrets.data.Sync.Profile.Email = localTestEmail
+	secrets.data.Sync.Profile.Key.UnmarshalText([]byte(localTestKey2))
+	secrets.initKeys()
+
+	// Generate a random org key (32 bytes) and mac key (32 bytes)
+	orgKey := make([]byte, 32)
+	orgMacKey := make([]byte, 32)
+	if _, err := rand.Read(orgKey); err != nil {
+		t.Fatalf("rand.Read orgKey: %v", err)
+	}
+	if _, err := rand.Read(orgMacKey); err != nil {
+		t.Fatalf("rand.Read orgMacKey: %v", err)
+	}
+
+	// Manually populate orgKeys and orgMacKeys
+	orgID := uuid.New()
+	secrets.orgKeys = map[string][]byte{
+		orgID.String(): orgKey,
+	}
+	secrets.orgMacKeys = map[string][]byte{
+		orgID.String(): orgMacKey,
+	}
+
+	// Encrypt data with the org key
+	cs, err := encryptWith([]byte("org-secret"), AesCbc256_HmacSha256_B64, orgKey, orgMacKey)
+	if err != nil {
+		t.Fatalf("encryptWith org key: %v", err)
+	}
+
+	// Decrypt with the org ID — should use the org-key path
+	dec, err := secrets.decrypt(cs, &orgID)
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, string(dec), qt.Equals, "org-secret")
+}
+
+// TestDecrypt_OrgKey_Missing verifies that decrypt() returns an error when
+// orgID is provided but orgKeys lacks that ID (crypto.go:308-309 with nil
+// keys from map lookup).
+func TestDecrypt_OrgKey_Missing(t *testing.T) {
+	origSecrets := secrets
+	origEmail := os.Getenv("EMAIL")
+	t.Cleanup(func() {
+		secrets = origSecrets
+		os.Setenv("EMAIL", origEmail)
+	})
+
+	os.Setenv("EMAIL", localTestEmail)
+	secrets = secretCache{
+		_password: []byte(localTestPassword),
+		data: &dataFile{
+			KDFIterations: 100000,
+		},
+	}
+	secrets.data.Sync.Profile.Email = localTestEmail
+	secrets.data.Sync.Profile.Key.UnmarshalText([]byte(localTestKey2))
+	secrets.initKeys()
+
+	// Set up empty orgKeys map
+	secrets.orgKeys = make(map[string][]byte)
+	secrets.orgMacKeys = make(map[string][]byte)
+
+	// Encrypt some data with the main key
+	cs := encryptStr(t, "test data")
+
+	// Try to decrypt with an org ID that doesn't exist in orgKeys
+	missingOrgID := uuid.New()
+	_, err := secrets.decrypt(cs, &missingOrgID)
+	// The decrypt should fail because orgKeys[missingOrgID] is nil
+	qt.Assert(t, err, qt.IsNotNil)
+}
+
+// TestInitKeys_OrgKey_RSAOAEP verifies that initKeys() decrypts organization
+// keys via RSA-OAEP (crypto.go:247-264). This test builds a full fixture with
+// an RSA-encrypted org key.
+func TestInitKeys_OrgKey_RSAOAEP(t *testing.T) {
+	origSecrets := secrets
+	origEmail := os.Getenv("EMAIL")
+	t.Cleanup(func() {
+		secrets = origSecrets
+		os.Setenv("EMAIL", origEmail)
+	})
+
+	os.Setenv("EMAIL", localTestEmail)
+	secrets = secretCache{
+		_password: []byte(localTestPassword),
+		data: &dataFile{
+			KDFIterations: 100000,
+		},
+	}
+	secrets.data.Sync.Profile.Email = localTestEmail
+	secrets.data.Sync.Profile.Key.UnmarshalText([]byte(localTestKey2))
+
+	// Initialize keys first so we can encrypt the private key
+	if err := secrets.initKeys(); err != nil {
+		t.Fatalf("initKeys: %v", err)
+	}
+
+	// Generate a real RSA private key
+	pkey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey: %v", err)
+	}
+
+	// Marshal to PKCS8 and encrypt for Profile.PrivateKey
+	pkcs8Key, err := x509.MarshalPKCS8PrivateKey(pkey)
+	if err != nil {
+		t.Fatalf("MarshalPKCS8PrivateKey: %v", err)
+	}
+	encryptedPrivKey, err := secrets.encrypt(pkcs8Key)
+	if err != nil {
+		t.Fatalf("encrypt private key: %v", err)
+	}
+
+	// Generate a random 64-byte org key (32 key + 32 mac)
+	orgKeyMaterial := make([]byte, 64)
+	if _, err := rand.Read(orgKeyMaterial); err != nil {
+		t.Fatalf("rand.Read orgKeyMaterial: %v", err)
+	}
+
+	// RSA-OAEP encrypt the org key material with the public key
+	encryptedOrgKey, err := rsa.EncryptOAEP(sha1.New(), rand.Reader, &pkey.PublicKey, orgKeyMaterial, nil)
+	if err != nil {
+		t.Fatalf("rsa.EncryptOAEP: %v", err)
+	}
+
+	// Build the organization.Key string: "4.<base64>"
+	// The first byte is the encryption type (4 = Rsa2048_OaepSha1_B64),
+	// the second byte is a separator (.)
+	orgKeyString := fmt.Sprintf("4.%s", base64.StdEncoding.EncodeToString(encryptedOrgKey))
+
+	orgID := uuid.New()
+	org := Organization{
+		Id:  orgID,
+		Key: orgKeyString,
+	}
+
+	// Reset secrets and set up the full fixture
+	secrets.key = nil
+	secrets.macKey = nil
+	secrets.privateKey = nil
+	secrets.orgKeys = nil
+	secrets.orgMacKeys = nil
+	secrets.data.Sync.Profile.PrivateKey = encryptedPrivKey
+	secrets.data.Sync.Profile.Organizations = []Organization{org}
+
+	// Call initKeys — it should parse the RSA private key and decrypt the org key
+	if err := secrets.initKeys(); err != nil {
+		t.Fatalf("initKeys with org: %v", err)
+	}
+
+	// Assert the org key was decrypted correctly
+	qt.Assert(t, secrets.orgKeys[orgID.String()], qt.DeepEquals, orgKeyMaterial[0:32])
+	qt.Assert(t, secrets.orgMacKeys[orgID.String()], qt.DeepEquals, orgKeyMaterial[32:64])
 }
