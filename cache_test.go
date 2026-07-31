@@ -544,6 +544,129 @@ bw-key = BW_CLIENTSECRET
 		qt.Commentf("secret-tool args must contain decrypted value (not empty); got: %q", argsStr))
 }
 
+// TestCache_LibsecretMirror_CustomField covers the [cache-fields]→mirror
+// path: a custom field name (not a login.password) gets decrypted and
+// mirrored. This is the production code path for BW_CLIENTID, which lives
+// in a custom field on the `devbox-global/bitwarden-api-key` cipher per
+// ADR-0003. Without this test, the half of the B1 fix that handles custom
+// fields (cache.go:201, `decrypted[fieldName] = val`) could be silently
+// broken without any test failure.
+func TestCache_LibsecretMirror_CustomField(t *testing.T) {
+	dir := setupCacheTest(t)
+
+	// Stub secret-tool that logs argv.
+	argsLog := filepath.Join(dir, "secret-tool-args")
+	stubDir := filepath.Join(dir, "bin")
+	os.MkdirAll(stubDir, 0o755)
+	stubPath := filepath.Join(stubDir, "secret-tool")
+	stub := "#!/bin/sh\necho \"$@\" >> " + argsLog + "\n"
+	if err := os.WriteFile(stubPath, []byte(stub), 0o755); err != nil {
+		t.Skipf("could not create stub: %v", err)
+	}
+
+	// Build a Login cipher with a custom field — this is how BW_CLIENTID
+	// arrives in production: a non-password custom field on the
+	// bitwarden-api-key cipher.
+	bwCipher := testCipher(t, "bw-key", "client-secret-val")
+	bwCipher.Fields = []Field{
+		{Name: encryptStr(t, "BW_CLIENTID"), Value: encryptStr(t, "user.test-uuid-1234")},
+	}
+	globalData.Sync.Ciphers = []Cipher{bwCipher}
+
+	manifest := writeManifest(t, dir, `
+[cache-fields]
+bw-key = BW_CLIENTID
+`)
+	output := filepath.Join(dir, "out.sh")
+
+	// Prepend stub dir to PATH; do NOT pre-set BW_CLIENTID (mimics init-hook).
+	oldPath := os.Getenv("PATH")
+	os.Setenv("PATH", stubDir+":"+oldPath)
+	defer os.Setenv("PATH", oldPath)
+	os.Unsetenv("BW_CLIENTID")
+	defer os.Unsetenv("BW_CLIENTID")
+
+	captureStderr(t, func() {
+		err := cmdCache(context.Background(), []string{
+			"-config", manifest,
+			"-output", output,
+			"-mirror-libsecret", "BW_CLIENTID",
+		})
+		qt.Assert(t, err, qt.IsNil)
+	})
+
+	// Cache file must contain the decrypted custom field value.
+	data, err := os.ReadFile(output)
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, strings.Contains(string(data), "export BW_CLIENTID='user.test-uuid-1234'"), qt.IsTrue,
+		qt.Commentf("cache file: %q", string(data)))
+
+	// secret-tool must have been called with the decrypted value as a
+	// positional argument — not an empty string.
+	argsData, err := os.ReadFile(argsLog)
+	qt.Assert(t, err, qt.IsNil)
+	argsStr := string(argsData)
+	qt.Assert(t, strings.Contains(argsStr, "BW_CLIENTID"), qt.IsTrue,
+		qt.Commentf("secret-tool args: %q", argsStr))
+	qt.Assert(t, strings.Contains(argsStr, "user.test-uuid-1234"), qt.IsTrue,
+		qt.Commentf("secret-tool args must contain decrypted custom-field value (not empty); got: %q", argsStr))
+}
+
+// TestCache_LibsecretMirror_MissingKey verifies that requesting a var for
+// mirror that was not decrypted by this run emits a warning instead of
+// silently writing an empty string to libsecret (which would clobber any
+// previously-stored good value).
+func TestCache_LibsecretMirror_MissingKey(t *testing.T) {
+	dir := setupCacheTest(t)
+
+	// Stub secret-tool that logs argv — should NOT be called.
+	argsLog := filepath.Join(dir, "secret-tool-args")
+	stubDir := filepath.Join(dir, "bin")
+	os.MkdirAll(stubDir, 0o755)
+	stubPath := filepath.Join(stubDir, "secret-tool")
+	stub := "#!/bin/sh\necho \"$@\" >> " + argsLog + "\n"
+	if err := os.WriteFile(stubPath, []byte(stub), 0o755); err != nil {
+		t.Skipf("could not create stub: %v", err)
+	}
+
+	globalData.Sync.Ciphers = []Cipher{
+		testCipher(t, "bw-key", "client-secret-val"),
+	}
+	manifest := writeManifest(t, dir, `
+[cache]
+bw-key = BW_CLIENTSECRET
+`)
+	output := filepath.Join(dir, "out.sh")
+
+	oldPath := os.Getenv("PATH")
+	os.Setenv("PATH", stubDir+":"+oldPath)
+	defer os.Setenv("PATH", oldPath)
+
+	// Request a mirror for BW_TYPO_NOT_IN_MANIFEST — must warn, not write empty.
+	stderr := captureStderr(t, func() {
+		err := cmdCache(context.Background(), []string{
+			"-config", manifest,
+			"-output", output,
+			"-mirror-libsecret", "BW_TYPO_NOT_IN_MANIFEST",
+		})
+		qt.Assert(t, err, qt.IsNil)
+	})
+	qt.Assert(t, strings.Contains(stderr, "BW_TYPO_NOT_IN_MANIFEST"), qt.IsTrue,
+		qt.Commentf("must warn about missing mirror var; stderr: %q", stderr))
+	qt.Assert(t, strings.Contains(stderr, "not decrypted"), qt.IsTrue,
+		qt.Commentf("warning must explain the cause; stderr: %q", stderr))
+
+	// Verify secret-tool was NOT called. The stub only writes to argsLog
+	// when invoked, so the file may legitimately not exist (that is the
+	// success condition). If it does exist, it must not contain the
+	// unknown mirror var name.
+	if argsData, err := os.ReadFile(argsLog); err == nil {
+		qt.Assert(t, strings.Contains(string(argsData), "BW_TYPO_NOT_IN_MANIFEST"), qt.IsFalse,
+			qt.Commentf("secret-tool must not be invoked for an unknown mirror var; got: %q", string(argsData)))
+	}
+	// err != nil (file does not exist) is the expected success condition.
+}
+
 // TestCache_CallsSync is the regression guard for the sync preflight added
 // so `bitw cache` can fully replace the bash bin/secrets-refresh wrapper
 // (which did `bitw sync` as a preflight before its per-item loop). Without

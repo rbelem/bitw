@@ -92,7 +92,7 @@ func cmdCreate(ctx context.Context, args []string) error {
 		return fmt.Errorf("could not create cipher: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "✓ Created %s (id: %s)\n", cipherName, created.ID)
+	fmt.Fprintf(os.Stderr, "✓ Created %s (id: %s, personal vault)\n", cipherName, created.ID)
 	if len(parsedFields) > 0 {
 		fmt.Fprintf(os.Stderr, "  + %d custom field(s)\n", len(parsedFields))
 	}

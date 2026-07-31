@@ -260,6 +260,12 @@ func cmdCache(ctx context.Context, args []string) error {
 // which means os.Getenv would always return "" there. Sourcing from the
 // `values` map avoids this hazard entirely.
 //
+// If a var was requested for mirror but does not appear in the manifest's
+// decrypted values, we warn on stderr instead of silently writing an empty
+// string to libsecret — an empty credential would clobber any previously-
+// stored good value and is almost certainly a config error (typo in the
+// manifest or in `--mirror-libsecret`).
+//
 // Failures are warned on stderr but never abort the cache command.
 func mirrorLibsecretVars(vars string, values map[string]string) {
 	for _, v := range strings.Split(vars, ",") {
@@ -267,9 +273,16 @@ func mirrorLibsecretVars(vars string, values map[string]string) {
 		if v == "" {
 			continue
 		}
+		val, ok := values[v]
+		if !ok {
+			fmt.Fprintf(os.Stderr,
+				"warning: --mirror-libsecret requested %q but it was not decrypted by this run; "+
+					"check the manifest matches the var name and the cipher exists\n", v)
+			continue
+		}
 		cmd := exec.Command("secret-tool", "store",
 			"--label=Bitwarden API key",
-			"bitwarden", v, values[v],
+			"bitwarden", v, val,
 		)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not mirror %s to libsecret: %v %s\n",
