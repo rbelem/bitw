@@ -42,6 +42,7 @@ Commands:
 	get     retrieve a cipher's fields (shell-eval or bare output)
 	cache   decrypt ciphers into a shell-sourceable env file
 	create  create a new Login cipher in the personal vault
+	status  print current runtime state (token, KDF, last sync) — diagnostic
 	config  print the current configuration
 	`[1:])
 	flagSet.PrintDefaults()
@@ -394,6 +395,10 @@ func run(args ...string) (err error) {
 		}
 	case "create":
 		if err := cmdCreate(ctx, args[1:]); err != nil {
+			return err
+		}
+	case "status":
+		if err := cmdStatus(ctx, args[1:]); err != nil {
 			return err
 		}
 	default:
