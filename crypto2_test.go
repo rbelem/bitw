@@ -557,3 +557,57 @@ func TestUnpadPKCS7_InvalidPaddingValue(t *testing.T) {
 	_, err := unpadPKCS7(data, 16)
 	qt.Assert(t, err, qt.ErrorMatches, "cannot unpad.*")
 }
+
+// TestPassword_LibsecretHit verifies that password() returns the libsecret-
+// cached password when secret-tool lookup succeeds (crypto.go:110-114). The
+// prompt must NOT be called, and the seam invocation must be recorded so a
+// future seam bypass cannot silently false-pass (the bug class fixed in
+// d996d51).
+func TestPassword_LibsecretHit(t *testing.T) {
+	origSecrets := secrets
+	origPassword := os.Getenv("PASSWORD")
+	t.Cleanup(func() {
+		secrets = origSecrets
+		os.Setenv("PASSWORD", origPassword)
+	})
+
+	os.Unsetenv("PASSWORD")
+	secrets = secretCache{
+		data: &dataFile{},
+	}
+
+	// Use fakeExec to make secret-tool lookup return a stored password.
+	fake := &fakeExec{
+		lookPathFn: func(name string) (string, error) {
+			if name == "secret-tool" {
+				return "/usr/bin/secret-tool", nil
+			}
+			return "", nil
+		},
+		outputFn: func(env []string, name string, args ...string) ([]byte, error) {
+			// Simulate secret-tool lookup returning a stored password.
+			return []byte("stored-pw\n"), nil
+		},
+	}
+	useFakeExec(t, fake)
+
+	// Mock passwordPromptFunc to fail if called — the libsecret branch
+	// must short-circuit before reaching the prompt.
+	oldPrompt := passwordPromptFunc
+	passwordPromptFunc = func(prompt string) ([]byte, error) {
+		t.Fatal("passwordPromptFunc must not be called when libsecret returns a password")
+		return nil, nil
+	}
+	t.Cleanup(func() { passwordPromptFunc = oldPrompt })
+
+	pw, err := secrets.password()
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, string(pw), qt.Equals, "stored-pw")
+
+	// Assert the seam was invoked with the correct argv. This pins the
+	// seam invocation so a future seam bypass cannot silently false-pass.
+	qt.Assert(t, len(fake.calls), qt.Equals, 1, qt.Commentf("expected exactly one secret-tool call"))
+	qt.Assert(t, fake.calls[0], qt.DeepEquals, []string{
+		"secret-tool", "lookup", "bitwarden", "master-password",
+	})
+}

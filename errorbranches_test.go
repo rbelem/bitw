@@ -491,6 +491,79 @@ func TestResolveField_DecryptError(t *testing.T) {
 	qt.Assert(t, err, qt.ErrorMatches, ".*MAC.*")
 }
 
+// TestHttpDo_Non200_GET verifies that jsonGET returns an *errStatusCode when
+// the server responds with a non-200 status (api.go:98-100). This is the
+// primary signal when the Bitwarden server rejects a request.
+func TestHttpDo_Non200_GET(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"message":"The model state is invalid.","validationErrors":{"":["cipher already exists"]}}`))
+	}))
+	defer server.Close()
+
+	var result interface{}
+	err := jsonGET(context.Background(), server.URL+"/some-endpoint", &result)
+	qt.Assert(t, err, qt.IsNotNil)
+
+	var statusErr *errStatusCode
+	qt.Assert(t, err, qt.IsNotNil)
+	// Type-assert to *errStatusCode to verify the error branch.
+	ok := false
+	if se, ok2 := err.(*errStatusCode); ok2 {
+		statusErr = se
+		ok = true
+	}
+	qt.Assert(t, ok, qt.IsTrue, qt.Commentf("expected *errStatusCode, got %T: %v", err, err))
+	qt.Assert(t, statusErr.code, qt.Equals, http.StatusBadRequest)
+	qt.Assert(t, string(statusErr.body), qt.Contains, "The model state is invalid")
+	qt.Assert(t, string(statusErr.body), qt.Contains, "cipher already exists")
+}
+
+// TestHttpDo_Non200_POST verifies that jsonPOST returns an *errStatusCode when
+// the server responds with a non-200 status (api.go:98-100). Same shape as
+// the real Bitwarden validation error response.
+func TestHttpDo_Non200_POST(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"message":"The model state is invalid.","validationErrors":{"Name":["The Name field is required."]}}`))
+	}))
+	defer server.Close()
+
+	var result interface{}
+	err := jsonPOST(context.Background(), server.URL+"/ciphers/create", &result, map[string]string{"name": "test"})
+	qt.Assert(t, err, qt.IsNotNil)
+
+	var statusErr *errStatusCode
+	if se, ok := err.(*errStatusCode); ok {
+		statusErr = se
+	}
+	qt.Assert(t, statusErr, qt.IsNotNil, qt.Commentf("expected *errStatusCode, got %T: %v", err, err))
+	qt.Assert(t, statusErr.code, qt.Equals, http.StatusBadRequest)
+	qt.Assert(t, string(statusErr.body), qt.Contains, "The model state is invalid")
+	qt.Assert(t, string(statusErr.body), qt.Contains, "Name field is required")
+}
+
+// TestHttpDo_200_InvalidJSON verifies that jsonGET returns an error and writes
+// the raw body to stderr when the server responds 200 but with invalid JSON
+// (api.go:101-104).
+func TestHttpDo_200_InvalidJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("not json"))
+	}))
+	defer server.Close()
+
+	var result interface{}
+	stderr := captureStderr(t, func() {
+		err := jsonGET(context.Background(), server.URL+"/some-endpoint", &result)
+		qt.Assert(t, err, qt.IsNotNil)
+		qt.Assert(t, err, qt.ErrorMatches, "invalid character.*")
+	})
+
+	// The raw body must be written to stderr for diagnostics.
+	qt.Assert(t, stderr, qt.Contains, "not json")
+}
+
 // TestCmdDump_DecryptError verifies that cmdDump returns an error when
 // decryption fails.
 func TestCmdDump_DecryptError(t *testing.T) {

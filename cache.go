@@ -103,6 +103,7 @@ func cmdCache(ctx context.Context, args []string) error {
 		}
 		name, err := secrets.decryptStr(c.Name, c.OrganizationID)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not decrypt name of cipher %s: %v\n", c.ID, err)
 			continue
 		}
 		cipherIndex[name] = c

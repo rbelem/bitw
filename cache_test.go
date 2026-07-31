@@ -17,6 +17,7 @@ import (
 	"time"
 
 	qt "github.com/frankban/quicktest"
+	"github.com/google/uuid"
 )
 
 // setupCacheTest initializes globalData and secrets with a working vault
@@ -111,6 +112,27 @@ func corruptCipher(t *testing.T, name string) Cipher {
 		CT:   make([]byte, 16),
 		MAC:  make([]byte, 32),
 	}
+	return c
+}
+
+// corruptNameCipher builds a Login cipher whose name has a bogus MAC (forces
+// "decrypt: MAC mismatch" on the name), but whose password decrypts correctly.
+// Used to test the diagnostic warning added to cache.go's cipherIndex loop.
+func corruptNameCipher(t *testing.T, password string) Cipher {
+	t.Helper()
+	c := Cipher{
+		Type: CipherLogin,
+		Name: CipherString{
+			Type: AesCbc256_HmacSha256_B64,
+			IV:   make([]byte, 16),
+			CT:   make([]byte, 16),
+			MAC:  make([]byte, 32),
+		},
+		Login: &Login{
+			Password: encryptStr(t, password),
+		},
+	}
+	c.ID = uuid.MustParse("00000000-0000-0000-0000-000000000bad")
 	return c
 }
 
@@ -770,3 +792,47 @@ synced-only-cipher = SYNCED_VAR
 // environments (Go's http.Server does not always deliver the client
 // cancel to the handler's r.Context() promptly), so we rely on manual
 // verification rather than a brittle automated assertion.)
+
+// TestCache_NameDecryptWarning is the regression guard for the diagnostic
+// warning added to cache.go's cipherIndex loop. Previously, when a cipher's
+// name failed to decrypt (e.g. MAC mismatch), the loop silently skipped it.
+// If that cipher was in the manifest, the user got a misleading "cipher not
+// found in vault" instead of the real decrypt error. The fix prints a warning
+// to stderr including the cipher ID and the decrypt error.
+func TestCache_NameDecryptWarning(t *testing.T) {
+	dir := setupCacheTest(t)
+
+	// One good cipher + one with a corrupt name (MAC mismatch on name).
+	goodCipher := testCipher(t, "good-cipher", "good-secret")
+	badCipher := corruptNameCipher(t, "bad-secret")
+	globalData.Sync.Ciphers = []Cipher{goodCipher, badCipher}
+
+	manifest := writeManifest(t, dir, `
+[cache]
+good-cipher = GOOD_VAR
+`)
+	output := filepath.Join(dir, "out.sh")
+
+	stderr := captureStderr(t, func() {
+		err := cmdCache(context.Background(), []string{
+			"-config", manifest,
+			"-output", output,
+		})
+		qt.Assert(t, err, qt.IsNil)
+	})
+
+	// The warning must mention the cipher ID and the decrypt error.
+	qt.Assert(t, strings.Contains(stderr, "could not decrypt name of cipher"), qt.IsTrue,
+		qt.Commentf("stderr must contain name-decrypt warning; got: %q", stderr))
+	qt.Assert(t, strings.Contains(stderr, "00000000-0000-0000-0000-000000000bad"), qt.IsTrue,
+		qt.Commentf("stderr must contain cipher ID; got: %q", stderr))
+	qt.Assert(t, strings.Contains(stderr, "MAC mismatch"), qt.IsTrue,
+		qt.Commentf("stderr must contain decrypt error; got: %q", stderr))
+
+	// The good cipher must still land in the cache output.
+	data, err := os.ReadFile(output)
+	qt.Assert(t, err, qt.IsNil)
+	content := string(data)
+	qt.Assert(t, strings.Contains(content, "export GOOD_VAR='good-secret'"), qt.IsTrue,
+		qt.Commentf("good cipher must still be cached; got: %q", content))
+}
