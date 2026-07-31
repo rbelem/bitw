@@ -9,7 +9,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -316,12 +315,10 @@ func mirrorLibsecretVars(vars string, values map[string]string) {
 					"the bash init-hook fallback cannot retrieve it. Add a case in mirrorAttrFor.\n", v)
 			attr = v
 		}
-		cmd := exec.Command("secret-tool", "store",
+		if out, err := shell.CombinedOutput([]byte(val), "secret-tool", "store",
 			"--label=Bitwarden API key",
 			"bitwarden", attr,
-		)
-		cmd.Stdin = bytes.NewReader([]byte(val))
-		if out, err := cmd.CombinedOutput(); err != nil {
+		); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not mirror %s to libsecret: %v %s\n",
 				v, err, bytes.TrimSpace(out))
 		}

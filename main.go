@@ -13,7 +13,6 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"time"
@@ -133,29 +132,27 @@ func termPasswordPrompt(prompt string) ([]byte, error) {
 // `bin/bitw-login` wrappers used before they were removed in Phase 5/7.
 func promptWithAskpass(prompt string) ([]byte, error) {
 	// 1. zenity (GTK dialog — works on KDE too)
-	if path, _ := exec.LookPath("zenity"); path != "" {
-		out, err := exec.Command(path, "--password", "--title="+prompt).Output()
+	if path, _ := shell.LookPath("zenity"); path != "" {
+		out, err := shell.Output(nil, path, "--password", "--title="+prompt)
 		if err == nil {
 			return bytes.TrimSpace(out), nil
 		}
 	}
 	// 2. kdialog (KDE)
-	if path, _ := exec.LookPath("kdialog"); path != "" {
-		out, err := exec.Command(path, "--password", prompt).Output()
+	if path, _ := shell.LookPath("kdialog"); path != "" {
+		out, err := shell.Output(nil, path, "--password", prompt)
 		if err == nil {
 			return bytes.TrimSpace(out), nil
 		}
 	}
 	// 3. SSH_ASKPASS (program specified by env var; typical for non-TTY)
 	if askpass := os.Getenv("SSH_ASKPASS"); askpass != "" {
-		if _, err := exec.LookPath(askpass); err == nil {
+		if _, err := shell.LookPath(askpass); err == nil {
 			display := os.Getenv("DISPLAY")
 			if display == "" {
 				display = ":0"
 			}
-			cmd := exec.Command(askpass, prompt)
-			cmd.Env = append(os.Environ(), "DISPLAY="+display)
-			out, err := cmd.Output()
+			out, err := shell.Output(append(os.Environ(), "DISPLAY="+display), askpass, prompt)
 			if err == nil {
 				return bytes.TrimSpace(out), nil
 			}

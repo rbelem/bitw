@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
@@ -315,16 +314,14 @@ func storeToken(tok tokLoginResponse) {
 }
 
 func storePasswordLibsecret(password []byte) {
-	if _, err := exec.LookPath("secret-tool"); err != nil {
+	if _, err := shell.LookPath("secret-tool"); err != nil {
 		fmt.Fprintf(os.Stderr,
 			"warning: secret-tool not found; master password not stored in keyring. "+
 				"bitw get will prompt for it.\n")
 		return
 	}
-	cmd := exec.Command("secret-tool", "store",
-		"--label=Bitwarden", "bitwarden", "master-password")
-	cmd.Stdin = bytes.NewReader(append(password, '\n'))
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := shell.CombinedOutput(append(password, '\n'), "secret-tool", "store",
+		"--label=Bitwarden", "bitwarden", "master-password"); err != nil {
 		fmt.Fprintf(os.Stderr,
 			"warning: could not store master password in keyring: %v %s\n",
 			err, bytes.TrimSpace(out))
