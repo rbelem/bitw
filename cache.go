@@ -260,6 +260,12 @@ func cmdCache(ctx context.Context, args []string) error {
 // which means os.Getenv would always return "" there. Sourcing from the
 // `values` map avoids this hazard entirely.
 //
+// The libsecret attribute scheme maps each env var to a stable semantic
+// name (e.g., `BW_CLIENTSECRET` → `api-key-secret`). The semantic names
+// are what the bash init-hook fallback looks up (`bin/init-hook:20,24`),
+// so the mirror must use them — not the env var name — or the round-trip
+// silently breaks. (See ADR-0003 §Fallback for the handoff.)
+//
 // If a var was requested for mirror but does not appear in the manifest's
 // decrypted values, we warn on stderr instead of silently writing an empty
 // string to libsecret — an empty credential would clobber any previously-
@@ -280,13 +286,35 @@ func mirrorLibsecretVars(vars string, values map[string]string) {
 					"check the manifest matches the var name and the cipher exists\n", v)
 			continue
 		}
+		attr, ok := mirrorAttrFor(v)
+		if !ok {
+			attr = v // unknown var → use the env var name itself (still consistent on read if caller mirrors with the same name)
+		}
 		cmd := exec.Command("secret-tool", "store",
 			"--label=Bitwarden API key",
-			"bitwarden", v, val,
+			"bitwarden", attr, val,
 		)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not mirror %s to libsecret: %v %s\n",
 				v, err, bytes.TrimSpace(out))
 		}
 	}
+}
+
+// mirrorAttrFor maps an env var name to its stable libsecret attribute name.
+// The bash init-hook fallback (`bin/init-hook:20,24`) hard-codes
+// `api-key-secret` / `api-key-client-id`; if the mirror wrote under
+// `BW_CLIENTSECRET` / `BW_CLIENTID` instead, the fallback would never find
+// what it stored (an attribute mismatch that was the source of a real
+// orphan-pane regression). This map is the single source of truth for
+// the mapping; keep it in sync with init-hook if you add new mirrored
+// credentials.
+func mirrorAttrFor(envVar string) (string, bool) {
+	switch envVar {
+	case "BW_CLIENTSECRET":
+		return "api-key-secret", true
+	case "BW_CLIENTID":
+		return "api-key-client-id", true
+	}
+	return "", false
 }

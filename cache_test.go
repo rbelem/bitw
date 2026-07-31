@@ -535,8 +535,13 @@ bw-key = BW_CLIENTSECRET
 		qt.Commentf("secret-tool args: %q", argsStr))
 	qt.Assert(t, strings.Contains(argsStr, "bitwarden"), qt.IsTrue,
 		qt.Commentf("secret-tool args: %q", argsStr))
-	qt.Assert(t, strings.Contains(argsStr, "BW_CLIENTSECRET"), qt.IsTrue,
-		qt.Commentf("secret-tool args: %q", argsStr))
+	// The mirror stores under a semantic libsecret attr name
+	// (api-key-secret / api-key-client-id) — NOT the env var name —
+	// so the bash init-hook fallback can find what was stored. The
+	// mapping lives in cache.go:mirrorAttrFor and is the single source
+	// of truth shared with init-hook:20,24.
+	qt.Assert(t, strings.Contains(argsStr, "api-key-secret"), qt.IsTrue,
+		qt.Commentf("mirror must use semantic attr 'api-key-secret' (matches init-hook fallback); got: %q", argsStr))
 	// The critical assertion: the actual decrypted value reached secret-tool,
 	// not an empty string (which would happen if mirrorLibsecretVars read
 	// from os.Getenv under the init-hook scenario).
@@ -606,8 +611,8 @@ bw-key = BW_CLIENTID
 	argsData, err := os.ReadFile(argsLog)
 	qt.Assert(t, err, qt.IsNil)
 	argsStr := string(argsData)
-	qt.Assert(t, strings.Contains(argsStr, "BW_CLIENTID"), qt.IsTrue,
-		qt.Commentf("secret-tool args: %q", argsStr))
+	qt.Assert(t, strings.Contains(argsStr, "api-key-client-id"), qt.IsTrue,
+		qt.Commentf("mirror must use semantic attr 'api-key-client-id' (matches init-hook fallback); got: %q", argsStr))
 	qt.Assert(t, strings.Contains(argsStr, "user.test-uuid-1234"), qt.IsTrue,
 		qt.Commentf("secret-tool args must contain decrypted custom-field value (not empty); got: %q", argsStr))
 }
