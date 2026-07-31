@@ -21,7 +21,6 @@ import (
 	"math"
 	"math/big"
 	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/google/uuid"
@@ -123,9 +122,10 @@ func (c *secretCache) password() ([]byte, error) {
 // readLibsecretPassword shells out to `secret-tool` to look up the cached
 // master password under the libsecret item "bitwarden master-password".
 // Returns the trimmed password bytes, or an error if lookup failed.
+// Goes through the shell seam (exec.go) so tests can fake secret-tool
+// instead of hitting the real keyring.
 func readLibsecretPassword() ([]byte, error) {
-	cmd := exec.Command("secret-tool", "lookup", "bitwarden", "master-password")
-	out, err := cmd.Output()
+	out, err := shell.Output(nil, "secret-tool", "lookup", "bitwarden", "master-password")
 	if err != nil {
 		return nil, err
 	}

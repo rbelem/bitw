@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -175,6 +176,85 @@ func readAll(r interface {
 	return buf.Bytes(), err
 }
 
+// assertCreateBodyContract locks the /ciphers/create wire shape against the
+// Bitwarden server contract. Every assertion guards a bug that actually hit
+// production:
+//   - the cipher is wrapped in a top-level "cipher" key — a flat body is
+//     rejected with "The Cipher field is required"
+//   - login.username is null, never "" — an empty string fails the server's
+//     [EncryptedString] validator with "Username is not a valid encrypted
+//     string"
+//   - no folderId/organizationId/collectionIds — personal vault only
+//   - name, password and custom-field values are encrypted cipher strings
+//     ("2.iv|ct|mac"), never plaintext
+func assertCreateBodyContract(t *testing.T, body []byte, cipherName string, wantFields int) {
+	t.Helper()
+	var parsed map[string]interface{}
+	qt.Assert(t, json.Unmarshal(body, &parsed), qt.IsNil)
+
+	// Top level must contain ONLY the "cipher" key.
+	qt.Assert(t, sortedKeys(parsed), qt.ContentEquals, []string{"cipher"})
+
+	cipherMap, ok := parsed["cipher"].(map[string]interface{})
+	qt.Assert(t, ok, qt.IsTrue)
+	qt.Assert(t, cipherMap["type"], qt.Equals, float64(CipherLogin))
+
+	// Personal-vault contract: org/folder/collection keys must not appear.
+	for _, forbidden := range []string{"folderId", "organizationId", "collectionIds"} {
+		_, present := cipherMap[forbidden]
+		qt.Assert(t, present, qt.IsFalse, qt.Commentf("unexpected %q on the wire", forbidden))
+	}
+
+	// name must be an encrypted cipher string, never plaintext.
+	nameStr, ok := cipherMap["name"].(string)
+	qt.Assert(t, ok, qt.IsTrue)
+	qt.Assert(t, strings.HasPrefix(nameStr, "2."), qt.IsTrue)
+	qt.Assert(t, strings.Contains(nameStr, cipherName), qt.IsFalse,
+		qt.Commentf("name must be encrypted, got: %q", nameStr))
+
+	// login carries exactly username + password; username must be null.
+	loginMap, ok := cipherMap["login"].(map[string]interface{})
+	qt.Assert(t, ok, qt.IsTrue)
+	qt.Assert(t, sortedKeys(loginMap), qt.ContentEquals, []string{"password", "username"})
+	qt.Assert(t, loginMap["username"], qt.IsNil,
+		qt.Commentf("username must be null on the wire, got: %v", loginMap["username"]))
+	pwStr, ok := loginMap["password"].(string)
+	qt.Assert(t, ok, qt.IsTrue)
+	qt.Assert(t, strings.HasPrefix(pwStr, "2."), qt.IsTrue)
+
+	if wantFields > 0 {
+		fieldsArr, ok := cipherMap["fields"].([]interface{})
+		qt.Assert(t, ok, qt.IsTrue)
+		qt.Assert(t, len(fieldsArr), qt.Equals, wantFields)
+		for _, f := range fieldsArr {
+			fmap, ok := f.(map[string]interface{})
+			qt.Assert(t, ok, qt.IsTrue)
+			qt.Assert(t, sortedKeys(fmap), qt.ContentEquals, []string{"name", "type", "value"})
+			qt.Assert(t, fmap["type"], qt.Equals, float64(0)) // text field
+			for _, k := range []string{"name", "value"} {
+				v, ok := fmap[k].(string)
+				qt.Assert(t, ok, qt.IsTrue)
+				qt.Assert(t, strings.HasPrefix(v, "2."), qt.IsTrue,
+					qt.Commentf("field %s must be encrypted, got: %q", k, v))
+			}
+		}
+	} else {
+		_, hasFields := cipherMap["fields"]
+		qt.Assert(t, hasFields, qt.IsFalse, qt.Commentf("no fields expected on the wire"))
+	}
+}
+
+// sortedKeys returns the keys of a decoded JSON object in sorted order so
+// set-equality assertions are deterministic.
+func sortedKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 // TestCmdCreate_HappyPath verifies that cmdCreate POSTs the expected JSON
 // shape to /ciphers/create, prompts for the secret via passwordPromptFunc,
 // and prints the created cipher ID.
@@ -208,41 +288,8 @@ func TestCmdCreate_HappyPath(t *testing.T) {
 		qt.Assert(t, err, qt.IsNil)
 	})
 
-	// Verify the POST body shape. /ciphers/create requires the cipher
-	// wrapped in a top-level "cipher" key.
-	var parsed map[string]interface{}
-	qt.Assert(t, json.Unmarshal(createdBody, &parsed), qt.IsNil)
-	cipherMap, ok := parsed["cipher"].(map[string]interface{})
-	qt.Assert(t, ok, qt.IsTrue)
-	qt.Assert(t, cipherMap["type"], qt.Equals, float64(CipherLogin))
-
-	// Every string field on the request must be an encrypted cipher string
-	// ("2.iv|ct|mac"), never plaintext. The plaintext round-trips elsewhere.
-	nameStr, ok := cipherMap["name"].(string)
-	qt.Assert(t, ok, qt.IsTrue)
-	qt.Assert(t, strings.HasPrefix(nameStr, "2."), qt.IsTrue)
-	qt.Assert(t, strings.Contains(nameStr, "devbox-global/github-token"), qt.IsFalse,
-		qt.Commentf("name must be encrypted, got: %q", nameStr))
-
-	loginMap, ok := cipherMap["login"].(map[string]interface{})
-	qt.Assert(t, ok, qt.IsTrue)
-	qt.Assert(t, loginMap["username"], qt.IsNil,
-		qt.Commentf("username must be null on the wire, got: %v", loginMap["username"]))
-	pwStr, ok := loginMap["password"].(string)
-	qt.Assert(t, ok, qt.IsTrue)
-	qt.Assert(t, strings.Contains(pwStr, "the-secret"), qt.IsFalse,
-		qt.Commentf("password must be encrypted, got: %q", pwStr))
-
-	fieldsArr, ok := cipherMap["fields"].([]interface{})
-	qt.Assert(t, ok, qt.IsTrue)
-	qt.Assert(t, len(fieldsArr), qt.Equals, 2)
-	for _, f := range fieldsArr {
-		fmap := f.(map[string]interface{})
-		qt.Assert(t, fmap["type"], qt.Equals, float64(0))
-		// Field name + value should both be encrypted strings.
-		qt.Assert(t, strings.HasPrefix(fmap["name"].(string), "2."), qt.IsTrue)
-		qt.Assert(t, strings.HasPrefix(fmap["value"].(string), "2."), qt.IsTrue)
-	}
+	// The captured POST body must match the /ciphers/create wire contract.
+	assertCreateBodyContract(t, createdBody, "devbox-global/github-token", 2)
 
 	// Stderr should mention the created cipher.
 	qt.Assert(t, strings.Contains(stderr, "Created devbox-global/github-token"), qt.IsTrue)
@@ -323,18 +370,12 @@ func TestCmdCreate_PasswordStdin(t *testing.T) {
 	})
 	qt.Assert(t, strings.Contains(stderr, "Created devbox-global/deepseek-api-key"), qt.IsTrue)
 
-	// The piped secret must be encrypted into login.password (with the
-	// trailing newline trimmed), never sent in plaintext.
+	// The wire contract holds, and the piped secret (trailing newline
+	// trimmed) round-trips through the encrypted login.password.
+	assertCreateBodyContract(t, createdBody, "devbox-global/deepseek-api-key", 0)
 	var parsed map[string]interface{}
 	qt.Assert(t, json.Unmarshal(createdBody, &parsed), qt.IsNil)
-	cipherMap, ok := parsed["cipher"].(map[string]interface{})
-	qt.Assert(t, ok, qt.IsTrue)
-	loginMap, ok := cipherMap["login"].(map[string]interface{})
-	qt.Assert(t, ok, qt.IsTrue)
-	pwStr, ok := loginMap["password"].(string)
-	qt.Assert(t, ok, qt.IsTrue)
-	qt.Assert(t, strings.Contains(pwStr, "stdin-secret"), qt.IsFalse,
-		qt.Commentf("password must be encrypted, got: %q", pwStr))
+	pwStr := parsed["cipher"].(map[string]interface{})["login"].(map[string]interface{})["password"].(string)
 	var cs CipherString
 	qt.Assert(t, cs.UnmarshalText([]byte(pwStr)), qt.IsNil)
 	qt.Assert(t, decryptFieldStr(t, cs, "password"), qt.Equals, "stdin-secret")

@@ -51,8 +51,10 @@ func TestPassword_LibsecretBranch(t *testing.T) {
 
 	pw, err := secrets.password()
 	qt.Assert(t, err, qt.IsNil)
-	// The password should be the prompted value (libsecret returned empty)
-	qt.Assert(t, len(pw) > 0, qt.IsTrue)
+	// secret-tool returned empty (fake outputFn), so the prompt mock must
+	// supply the value — this asserts the libsecret branch really fell
+	// through to the prompt, not that a real keyring answered.
+	qt.Assert(t, string(pw), qt.Equals, "prompted-password")
 }
 
 // TestPassword_PromptError verifies that password() propagates errors from
@@ -86,10 +88,7 @@ func TestPassword_PromptError(t *testing.T) {
 	t.Cleanup(func() { passwordPromptFunc = oldPrompt })
 
 	_, err := secrets.password()
-	// The error should be propagated from passwordPrompt
-	if err == nil {
-		t.Skip("Error not propagated - may be a bug in password()")
-	}
+	// The error must be propagated from passwordPrompt.
 	qt.Assert(t, err, qt.IsNotNil)
 }
 
@@ -115,8 +114,8 @@ func TestClientId_PromptFallback(t *testing.T) {
 
 	id, err := secrets.clientId()
 	qt.Assert(t, err, qt.IsNil)
-	// The client ID should be the prompted value
-	qt.Assert(t, len(id) > 0, qt.IsTrue)
+	// The client ID must be the mocked prompt value, not a real one.
+	qt.Assert(t, string(id), qt.Equals, "prompted-client-id")
 }
 
 // TestClientId_PromptError verifies that clientId() propagates errors from
@@ -140,10 +139,7 @@ func TestClientId_PromptError(t *testing.T) {
 	t.Cleanup(func() { passwordPromptFunc = oldPrompt })
 
 	_, err := secrets.clientId()
-	// The error should be propagated from passwordPrompt
-	if err == nil {
-		t.Skip("Error not propagated - may be a bug in clientId()")
-	}
+	// The error must be propagated from passwordPrompt.
 	qt.Assert(t, err, qt.IsNotNil)
 }
 
@@ -169,8 +165,8 @@ func TestClientSecret_PromptFallback(t *testing.T) {
 
 	secret, err := secrets.clientSecret()
 	qt.Assert(t, err, qt.IsNil)
-	// The secret should be the prompted value
-	qt.Assert(t, len(secret) > 0, qt.IsTrue)
+	// The secret must be the mocked prompt value, not a real one.
+	qt.Assert(t, string(secret), qt.Equals, "prompted-client-secret")
 }
 
 // TestClientSecret_PromptError verifies that clientSecret() propagates errors
@@ -194,11 +190,7 @@ func TestClientSecret_PromptError(t *testing.T) {
 	t.Cleanup(func() { passwordPromptFunc = oldPrompt })
 
 	_, err := secrets.clientSecret()
-	// The error should be propagated from passwordPrompt
-	// Note: This test may fail if the error is not propagated correctly
-	if err == nil {
-		t.Skip("Error not propagated - may be a bug in clientSecret()")
-	}
+	// The error must be propagated from passwordPrompt.
 	qt.Assert(t, err, qt.IsNotNil)
 }
 

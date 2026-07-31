@@ -171,8 +171,12 @@ func promptWithAskpass(prompt string) ([]byte, error) {
 	return termPasswordPrompt(prompt)
 }
 
+// passwordPrompt wraps the test-overridable passwordPromptFunc (auth.go) with
+// a contextual error. Production behavior is unchanged — the var defaults to
+// promptWithAskpass — but tests that mock passwordPromptFunc now take effect
+// here instead of silently falling through to the real GUI prompt chain.
 func passwordPrompt(prompt string) ([]byte, error) {
-	out, err := promptWithAskpass(prompt)
+	out, err := passwordPromptFunc(prompt)
 	if err != nil {
 		return nil, fmt.Errorf("could not obtain %s: %w", prompt, err)
 	}
