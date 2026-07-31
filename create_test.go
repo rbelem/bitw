@@ -50,10 +50,10 @@ func TestBuildLoginCipher_Basic(t *testing.T) {
 	qt.Assert(t, ok, qt.IsTrue)
 	qt.Assert(t, decryptFieldStr(t, pwCS, "password"), qt.Equals, "s3cr3t")
 
-	// username should be a zero CipherString (empty plaintext → no encryption).
-	usernameCS, ok := loginMap["username"].(CipherString)
-	qt.Assert(t, ok, qt.IsTrue)
-	qt.Assert(t, usernameCS.IsZero(), qt.IsTrue)
+	// username must be nil on the wire — the server's [EncryptedString]
+	// validator rejects an empty string with "Username is not a valid
+	// encrypted string" (matches what bw sends for an absent username).
+	qt.Assert(t, loginMap["username"], qt.IsNil)
 
 	// notes and fields should be absent when not provided.
 	_, hasNotes := body["notes"]
@@ -226,6 +226,8 @@ func TestCmdCreate_HappyPath(t *testing.T) {
 
 	loginMap, ok := cipherMap["login"].(map[string]interface{})
 	qt.Assert(t, ok, qt.IsTrue)
+	qt.Assert(t, loginMap["username"], qt.IsNil,
+		qt.Commentf("username must be null on the wire, got: %v", loginMap["username"]))
 	pwStr, ok := loginMap["password"].(string)
 	qt.Assert(t, ok, qt.IsTrue)
 	qt.Assert(t, strings.Contains(pwStr, "the-secret"), qt.IsFalse,

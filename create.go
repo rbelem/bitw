@@ -136,7 +136,10 @@ func buildLoginCipher(name, notes string, password []byte, fields []fieldPair) (
 		"type": CipherLogin,
 		"name": encName,
 		"login": map[string]interface{}{
-			"username": CipherString{}, // empty encrypted username
+			// The server's [EncryptedString] validator rejects empty strings
+			// with "Username is not a valid encrypted string". Send null
+			// (matches what bw sends for an absent username).
+			"username": nil,
 			"password": mustEncrypt(password, "password"),
 		},
 	}
