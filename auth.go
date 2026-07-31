@@ -331,10 +331,15 @@ func storePasswordLibsecret(password []byte) {
 }
 
 func buildApiKeyGrant() (url.Values, error) {
-	// Env-first per ADR-0003 §Context (crypto.go:111,127); libsecret is the
-	// dual-storage mirror (secrets-refresh:97-101) and only consulted when
-	// the env vars are absent. Without this priority, users with creds
-	// only in env get a silent fallthrough to password grant.
+	// Env-first per ADR-0003 §Context (auth.go:338-339). The Go binary
+	// never reads libsecret directly; the bash init-hook consumes the
+	// libsecret mirror and populates the shell env. The crypto.go
+	// fallback (secrets.clientId() / secrets.clientSecret() at
+	// crypto.go:137,153) is for *interactive prompts*, not libsecret —
+	// if env is empty and there's no TTY, `bitw` errors with
+	// "need a terminal to prompt for a password" for what is actually a
+	// missing API key. Without env-first priority, users with creds only
+	// in env get a silent fallthrough to password grant.
 	clientId := os.Getenv("BW_CLIENTID")
 	clientSecret := os.Getenv("BW_CLIENTSECRET")
 	if clientId == "" || clientSecret == "" {
