@@ -4,7 +4,6 @@ go 1.26
 
 require (
 	github.com/frankban/quicktest v1.14.4
-	github.com/godbus/dbus/v5 v5.1.0
 	github.com/google/uuid v1.3.0
 	github.com/kenshaw/ini v0.5.1
 	github.com/rogpeppe/go-internal v1.15.0

@@ -1,7 +1,6 @@
 ! bitw
 stderr -count=1 'Usage of'
 stderr -count=1 '\thelp'
-stderr -count=1 '\tserve'
 ! stdout .
 
 ! bitw -h

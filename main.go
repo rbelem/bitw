@@ -42,7 +42,6 @@ Commands:
 	get     retrieve a cipher's fields (shell-eval or bare output)
 	cache   decrypt ciphers into a shell-sourceable env file
 	create  create a new Login cipher in the personal vault
-	serve   start the org.freedesktop.secrets D-Bus service
 	config  print the current configuration
 	`[1:])
 	flagSet.PrintDefaults()
@@ -395,10 +394,6 @@ func run(args ...string) (err error) {
 		}
 	case "create":
 		if err := cmdCreate(ctx, args[1:]); err != nil {
-			return err
-		}
-	case "serve":
-		if err := serveDBus(ctx); err != nil {
 			return err
 		}
 	default:
