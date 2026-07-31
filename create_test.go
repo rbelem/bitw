@@ -208,27 +208,30 @@ func TestCmdCreate_HappyPath(t *testing.T) {
 		qt.Assert(t, err, qt.IsNil)
 	})
 
-	// Verify the POST body shape.
+	// Verify the POST body shape. /ciphers/create requires the cipher
+	// wrapped in a top-level "cipher" key.
 	var parsed map[string]interface{}
 	qt.Assert(t, json.Unmarshal(createdBody, &parsed), qt.IsNil)
-	qt.Assert(t, parsed["type"], qt.Equals, float64(CipherLogin))
+	cipherMap, ok := parsed["cipher"].(map[string]interface{})
+	qt.Assert(t, ok, qt.IsTrue)
+	qt.Assert(t, cipherMap["type"], qt.Equals, float64(CipherLogin))
 
 	// Every string field on the request must be an encrypted cipher string
 	// ("2.iv|ct|mac"), never plaintext. The plaintext round-trips elsewhere.
-	nameStr, ok := parsed["name"].(string)
+	nameStr, ok := cipherMap["name"].(string)
 	qt.Assert(t, ok, qt.IsTrue)
 	qt.Assert(t, strings.HasPrefix(nameStr, "2."), qt.IsTrue)
 	qt.Assert(t, strings.Contains(nameStr, "devbox-global/github-token"), qt.IsFalse,
 		qt.Commentf("name must be encrypted, got: %q", nameStr))
 
-	loginMap, ok := parsed["login"].(map[string]interface{})
+	loginMap, ok := cipherMap["login"].(map[string]interface{})
 	qt.Assert(t, ok, qt.IsTrue)
 	pwStr, ok := loginMap["password"].(string)
 	qt.Assert(t, ok, qt.IsTrue)
 	qt.Assert(t, strings.Contains(pwStr, "the-secret"), qt.IsFalse,
 		qt.Commentf("password must be encrypted, got: %q", pwStr))
 
-	fieldsArr, ok := parsed["fields"].([]interface{})
+	fieldsArr, ok := cipherMap["fields"].([]interface{})
 	qt.Assert(t, ok, qt.IsTrue)
 	qt.Assert(t, len(fieldsArr), qt.Equals, 2)
 	for _, f := range fieldsArr {

@@ -86,9 +86,13 @@ func cmdCreate(ctx context.Context, args []string) error {
 		return err
 	}
 
-	// POST /ciphers/create.
+	// POST /ciphers/create. The legacy /ciphers/create endpoint expects the
+	// cipher wrapped in a top-level "cipher" key (unlike the newer
+	// /ciphers endpoint, which takes a flat body). Sending fields at the
+	// top level causes the server to reject with "The Cipher field is
+	// required".
 	var created Cipher
-	if err := jsonPOST(ctx, apiURL+"/ciphers/create", &created, body); err != nil {
+	if err := jsonPOST(ctx, apiURL+"/ciphers/create", &created, map[string]interface{}{"cipher": body}); err != nil {
 		return fmt.Errorf("could not create cipher: %w", err)
 	}
 
