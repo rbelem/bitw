@@ -8,7 +8,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
+	"time"
 
 	qt "github.com/frankban/quicktest"
 )
@@ -123,4 +126,76 @@ func TestSync_PreloginFails_KDFCached_NonFatal(t *testing.T) {
 	c.Assert(globalData.KDFIterations, qt.Equals, 100000)
 	c.Assert(globalData.KDFMemory, qt.Equals, 16)
 	c.Assert(globalData.KDFParallelism, qt.Equals, 1)
+}
+
+// TestSync_TokenRefresh_UsesFreshToken verifies that after ensureToken
+// re-authenticates (due to token expiry), subsequent API calls use the fresh
+// token — not a stale snapshot from main.go entry. This is the W2 bug fix
+// regression guard: before the fix, httpDo read the token from ctx (snapshotted
+// at entry), so a re-auth in ensureToken would update globalData.AccessToken
+// but the ctx still had the old token → 401 on first subcommand call.
+func TestSync_TokenRefresh_UsesFreshToken(t *testing.T) {
+	var receivedTokens []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Capture the Authorization header on every request.
+		if auth := r.Header.Get("Authorization"); auth != "" {
+			receivedTokens = append(receivedTokens, strings.TrimPrefix(auth, "Bearer "))
+		}
+		switch r.URL.Path {
+		case "/connect/token":
+			// Re-auth endpoint — return a fresh token.
+			json.NewEncoder(w).Encode(tokLoginResponse{
+				AccessToken:  "fresh-token-after-reauth",
+				RefreshToken: "new-refresh",
+				ExpiresIn:    3600,
+				TokenType:    "Bearer",
+			})
+		case "/sync":
+			json.NewEncoder(w).Encode(SyncData{
+				Profile: Profile{Email: "test@example.com"},
+			})
+		case "/accounts/prelogin":
+			json.NewEncoder(w).Encode(preLoginResponse{KDF: 0, KDFIterations: 100000})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	oldApi, oldIdt := apiURL, idtURL
+	apiURL, idtURL = server.URL, server.URL
+	defer func() { apiURL, idtURL = oldApi, oldIdt }()
+
+	// Start with an expired token — ensureToken will re-auth.
+	globalData = dataFile{
+		AccessToken:  "stale-expired-token",
+		RefreshToken: "", // force login() path, not refreshToken()
+		TokenExpiry:  time.Now().Add(-1 * time.Hour),
+	}
+	secrets = secretCache{data: &globalData}
+
+	// Set env for API key login (client_credentials grant).
+	os.Setenv("BW_CLIENTID", "test-client-id")
+	os.Setenv("BW_CLIENTSECRET", "test-client-secret")
+	defer func() {
+		os.Unsetenv("BW_CLIENTID")
+		os.Unsetenv("BW_CLIENTSECRET")
+	}()
+
+	ctx := context.Background()
+
+	// ensureToken should re-auth (token expired, no refresh token → login).
+	err := ensureToken(ctx)
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, globalData.AccessToken, qt.Equals, "fresh-token-after-reauth")
+
+	// Now call sync — it should use the fresh token, not the stale one.
+	err = sync(ctx)
+	qt.Assert(t, err, qt.IsNil)
+
+	// Verify: the /sync request used the fresh token.
+	// receivedTokens[0] is from /connect/token (re-auth), [1] is from /sync.
+	qt.Assert(t, len(receivedTokens) >= 2, qt.IsTrue, qt.Commentf("expected at least 2 API calls, got %d", len(receivedTokens)))
+	qt.Assert(t, receivedTokens[1], qt.Equals, "fresh-token-after-reauth",
+		qt.Commentf("sync must use the fresh token after re-auth, not the stale one"))
 }

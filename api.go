@@ -38,8 +38,6 @@ func (e *errStatusCode) Error() string {
 	return fmt.Sprintf("%s: %s", http.StatusText(e.code), e.body)
 }
 
-type authToken struct{}
-
 func jsonPOST(ctx context.Context, urlstr string, recv, send interface{}) error {
 	var r io.Reader
 	contentType := "application/json"
@@ -71,8 +69,11 @@ func jsonGET(ctx context.Context, urlstr string, recv interface{}) error {
 }
 
 func httpDo(ctx context.Context, req *http.Request, recv interface{}) error {
-	if token, ok := ctx.Value(authToken{}).(string); ok {
-		req.Header.Set("Authorization", "Bearer "+token)
+	// Read the token directly from globalData instead of ctx. This ensures
+	// that after ensureToken re-authenticates (via login/refreshToken), the
+	// fresh token is used — not a stale snapshot from main.go entry.
+	if globalData.AccessToken != "" {
+		req.Header.Set("Authorization", "Bearer "+globalData.AccessToken)
 	}
 	// Bitwarden server rejects requests without client-identifying headers.
 	// See https://github.com/bitwarden/mobile/pull/1757 and

@@ -325,7 +325,6 @@ func run(args ...string) (err error) {
 		os.Exit(0)
 	}()
 
-	ctx = context.WithValue(ctx, authToken{}, globalData.AccessToken)
 	switch args[0] {
 	case "login":
 		if err := login(ctx); err != nil {
