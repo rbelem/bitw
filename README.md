@@ -5,14 +5,15 @@ A simple BitWarden client. Requires Go 1.19 or later.
 	go install github.com/rbelem/bitw@latest
 
 The goal is a static and portable client which integrates well with one's
-system. For example, on Linux it implements the `org.freedesktop.secrets` D-Bus
-service.
+system. `bitw` is a CLI client — it does not expose a Secret Service
+endpoint; for desktop integration, use a project that implements the
+`org.freedesktop.secrets` D-Bus service such as
+[kwalletd](https://invent.kde.org/frameworks/kwallet) or
+[gnome-keyring](https://gitlab.gnome.org/GNOME/gnome-keyring).
 
 **Note that this project isn't being actively developed right now, as I lack the time.**
 I am happy to hand over the repository to whoever can maintain and develop the project,
 with the only requirement that they make at least two non-trivial contributions first.
-Other projects with similar goals like https://github.com/quexten/goldwarden might be interesting too,
-which tackles desktop Bitwarden integration in Go via a GUI and autotype rather than a D-Bus service.
 
 #### Quickstart
 
@@ -25,19 +26,31 @@ You can then view your secrets:
 
 	bitw dump
 
-You can also start the D-Bus service, and use it:
+Fetch individual values for shell scripts (shell-eval-safe output):
 
-	bitw serve
-	secret-tool lookup name mysecret
+	# default mode: emits `export VAR='value'`
+	eval "$(bitw get my-item --env-name MY_VAR)"
+
+	# field mode: extract a single field
+	password=$(bitw get my-item --field password)
+
+Refresh a shell-sourceable cache of all configured secrets (replaces the
+bash `secrets-refresh` loop):
+
+	bitw cache --output ~/.cache/devbox-secrets.sh
+
+Inspect current runtime state (token expiry, KDF, last sync, etc.):
+
+	bitw status
 
 #### Non-goals
 
 These features are not planned at the moment:
 
-* A graphical interface - use `vault.bitwarden.com`
-* Querying secrets directly - use D-Bus clients like `secret-tool`
-* Integration with gnome-keyring - they both implement the same D-Bus service
-* Desktop autotype/autofill integration - it could be built on top of D-Bus secrets
+* A graphical interface — use `vault.bitwarden.com`
+* A D-Bus Secret Service endpoint — `bitw` is a CLI; use kwalletd /
+  gnome-keyring for desktop integration
+* Desktop autotype/autofill integration
 
 #### Further reading
 
@@ -46,7 +59,10 @@ Talking to BitWarden:
 * https://github.com/jcs/rubywarden/blob/master/API.md
 * https://fossil.birl.ca/doc/trunk/docs/build/html/crypto.html
 
-Integrating with the OS:
+Fork-specific docs (the rbelem/bitw fork):
 
-* https://specifications.freedesktop.org/secret-service/
-* https://www.chucknemeth.com/linux/security/keyring/secret-tool
+* `devbox.d/bitw/flake.nix` — per-commit rationale for the fork's
+  pin to a specific upstream commit
+* `docs/adr/0001`–`docs/adr/0005` in devbox-global — the architecture
+  decisions (vault source-of-truth, libsecret fallback, ADR-0005 token-
+  broker rejection)
