@@ -16,6 +16,11 @@ import (
 //
 //	bitw create <cipher-name> [--notes NOTES] [--field NAME=VALUE]...
 //
+// PERSONAL VAULT ONLY — org-cipher creation (which requires RSA-OAEP
+// encryption of the org key) is not implemented yet. If the same name
+// already exists in any org vault you belong to, the idempotency check
+// will still refuse; use `bw edit item <id>` to update the existing item.
+//
 // The secret value (login.password) is prompted for interactively via the
 // standard zenity / kdialog / SSH_ASKPASS / tty priority chain
 // (see promptWithAskpass in auth.go).
@@ -24,9 +29,6 @@ import (
 // items via `bw edit item <id>` instead. The script re-syncs after a
 // successful creation so the new item is visible to subsequent `bitw` calls
 // without requiring a separate `bitw sync`.
-//
-// Personal vault only; org-cipher creation (which requires RSA-OAEP
-// encryption of the org key) is not implemented yet.
 func cmdCreate(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("create", flag.ContinueOnError)
 	var notes string
@@ -37,7 +39,7 @@ func cmdCreate(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: bitw create [--notes NOTES] [--field NAME=VALUE]... <cipher-name>")
+		return fmt.Errorf("usage: bitw create [--notes NOTES] [--field NAME=VALUE]... <cipher-name> (personal vault only)")
 	}
 	cipherName := fs.Arg(0)
 

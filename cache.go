@@ -125,6 +125,15 @@ func cmdCache(ctx context.Context, args []string) error {
 	var failures int
 	var total int
 
+	// decrypted collects every (envVar, value) pair written to the cache
+	// file by the [cache] and [cache-fields] sections. The --mirror-libsecret
+	// flag then sources from this map (not os.Getenv) so the mirror sees
+	// the actual decrypted value, not whatever happened to be in the
+	// shell's environment. This is critical for the init-hook call path,
+	// which runs `bitw cache --mirror-libsecret=...` before sourcing the
+	// cache file — i.e. before any value is in the shell's env.
+	decrypted := make(map[string]string)
+
 	// [cache] section: cipher-name = ENV_VAR (password field).
 	// Use RawKeys to preserve cipher-name case (the default KeyManipFunc
 	// lowercases keys, which would break cipher names like
@@ -155,6 +164,9 @@ func cmdCache(ctx context.Context, args []string) error {
 				continue
 			}
 
+			if envVar != "" {
+				decrypted[envVar] = password
+			}
 			fmt.Fprintf(tmp, "export %s=%s\n", envVar, shellQuote(password))
 		}
 	}
@@ -186,6 +198,7 @@ func cmdCache(ctx context.Context, args []string) error {
 					continue
 				}
 
+				decrypted[fieldName] = val
 				fmt.Fprintf(tmp, "export %s=%s\n", fieldName, shellQuote(val))
 			}
 		}
@@ -231,15 +244,24 @@ func cmdCache(ctx context.Context, args []string) error {
 
 	// Mirror to libsecret (best-effort — failures warn but don't abort).
 	if mirrorLibsecret != "" {
-		mirrorLibsecretVars(mirrorLibsecret)
+		mirrorLibsecretVars(mirrorLibsecret, decrypted)
 	}
 
 	return nil
 }
 
-// mirrorLibsecretVars shells out to secret-tool for each comma-separated var.
+// mirrorLibsecretVars shells out to secret-tool for each comma-separated var,
+// sourcing values from `values` (the decrypted map populated by the [cache]
+// and [cache-fields] loops) rather than from os.Getenv. Reading from the env
+// would be wrong: cmdCache writes decrypted values to the output file but
+// never to its own process environment, so the only callers' shell would have
+// to source the cache file BEFORE this function runs. The init-hook path
+// (`bin/init-hook:13-14`) does the opposite — mirror first, source second —
+// which means os.Getenv would always return "" there. Sourcing from the
+// `values` map avoids this hazard entirely.
+//
 // Failures are warned on stderr but never abort the cache command.
-func mirrorLibsecretVars(vars string) {
+func mirrorLibsecretVars(vars string, values map[string]string) {
 	for _, v := range strings.Split(vars, ",") {
 		v = strings.TrimSpace(v)
 		if v == "" {
@@ -247,7 +269,7 @@ func mirrorLibsecretVars(vars string) {
 		}
 		cmd := exec.Command("secret-tool", "store",
 			"--label=Bitwarden API key",
-			"bitwarden", v, os.Getenv(v),
+			"bitwarden", v, values[v],
 		)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not mirror %s to libsecret: %v %s\n",

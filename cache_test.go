@@ -499,8 +499,15 @@ bw-key = BW_CLIENTSECRET
 	os.Setenv("PATH", stubDir+":"+oldPath)
 	defer os.Setenv("PATH", oldPath)
 
-	// Set the env var so the mirror has something to read.
-	os.Setenv("BW_CLIENTSECRET", "client-secret-val")
+	// Deliberately do NOT pre-set BW_CLIENTSECRET in the environment. This
+	// reproduces the init-hook scenario where `bitw cache --mirror-libsecret=...`
+	// runs before the cache file is sourced, so no decrypted value is in
+	// the process env. If cmdCache mirrors from os.Getenv (the old bug),
+	// secret-tool would be called with an empty value — overwriting the
+	// existing libsecret mirror with garbage. With the fix, the decrypted
+	// value flows from cmdCache's internal map to secret-tool regardless
+	// of the env state.
+	os.Unsetenv("BW_CLIENTSECRET")
 	defer os.Unsetenv("BW_CLIENTSECRET")
 
 	captureStderr(t, func() {
@@ -517,7 +524,8 @@ bw-key = BW_CLIENTSECRET
 	qt.Assert(t, err, qt.IsNil)
 	qt.Assert(t, strings.Contains(string(data), "export BW_CLIENTSECRET='client-secret-val'"), qt.IsTrue)
 
-	// Verify secret-tool was called with the right arguments.
+	// Verify secret-tool was called with the right arguments AND the
+	// decrypted value (the regression guard for the B1 bug).
 	argsData, err := os.ReadFile(argsLog)
 	qt.Assert(t, err, qt.IsNil)
 	argsStr := string(argsData)
@@ -529,6 +537,11 @@ bw-key = BW_CLIENTSECRET
 		qt.Commentf("secret-tool args: %q", argsStr))
 	qt.Assert(t, strings.Contains(argsStr, "BW_CLIENTSECRET"), qt.IsTrue,
 		qt.Commentf("secret-tool args: %q", argsStr))
+	// The critical assertion: the actual decrypted value reached secret-tool,
+	// not an empty string (which would happen if mirrorLibsecretVars read
+	// from os.Getenv under the init-hook scenario).
+	qt.Assert(t, strings.Contains(argsStr, "client-secret-val"), qt.IsTrue,
+		qt.Commentf("secret-tool args must contain decrypted value (not empty); got: %q", argsStr))
 }
 
 // TestCache_CallsSync is the regression guard for the sync preflight added
