@@ -101,7 +101,7 @@ func cmdCache(ctx context.Context, args []string) error {
 		if c.Login == nil {
 			continue
 		}
-		name, err := secrets.decryptStr(c.Name, c.OrganizationID)
+		name, err := secrets.decryptFieldStr(c, c.Name)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not decrypt name of cipher %s: %v\n", c.ID, err)
 			continue
@@ -164,7 +164,7 @@ func cmdCache(ctx context.Context, args []string) error {
 				continue
 			}
 
-			password, err := secrets.decryptStr(cipher.Login.Password, cipher.OrganizationID)
+			password, err := secrets.decryptFieldStr(cipher, cipher.Login.Password)
 			if err != nil {
 				failures++
 				fmt.Fprintf(os.Stderr, "bitw cache: %s: decrypt field password: %v (%s, email from: %s)\n",
