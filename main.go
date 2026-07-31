@@ -40,7 +40,8 @@ Commands:
 	dump    list all the stored login secrets
 	get     retrieve a cipher's fields (shell-eval or bare output)
 	cache   decrypt ciphers into a shell-sourceable env file
-	create  create a new Login cipher in the personal vault
+	create  create a new cipher in the personal vault
+	edit    modify an existing cipher (notes, password, fields)
 	status  print current runtime state (token, KDF, last sync) — diagnostic
 	config  print the current configuration
 	`[1:])
@@ -317,7 +318,7 @@ func cmdDump(ctx context.Context) error {
 			var s []byte
 			var err error
 
-			s, err = secrets.decrypt(cipherStr, cipher.OrganizationID)
+			s, err = secrets.decryptField(cipher, cipherStr)
 
 			if err != nil {
 				return err
@@ -360,6 +361,10 @@ func dispatch(ctx context.Context, args []string) error {
 		}
 	case "create":
 		if err := cmdCreate(ctx, args[1:]); err != nil {
+			return err
+		}
+	case "edit":
+		if err := cmdEdit(ctx, args[1:]); err != nil {
 			return err
 		}
 	case "status":
