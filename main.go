@@ -104,6 +104,13 @@ func readLine(prompt string) ([]byte, error) {
 
 // termPasswordPrompt reads a password from the terminal using term.ReadPassword.
 // This is the lowest-level prompt fallback when no GUI/SSH_ASKPASS tool is available.
+
+// isTerminalFunc and readPasswordFunc are overridable for tests.
+var (
+	isTerminalFunc   = term.IsTerminal
+	readPasswordFunc = term.ReadPassword
+)
+
 func termPasswordPrompt(prompt string) ([]byte, error) {
 	// TODO: Support cancellation with ^C. Currently not possible in any
 	// simple way. Closing os.Stdin on cancel doesn't seem to do the trick
@@ -112,16 +119,16 @@ func termPasswordPrompt(prompt string) ([]byte, error) {
 
 	fd := int(os.Stdin.Fd())
 	switch {
-	case term.IsTerminal(fd):
+	case isTerminalFunc(fd):
 		fmt.Fprintf(os.Stderr, "%s: ", prompt)
-		password, err := term.ReadPassword(fd)
+		password, err := readPasswordFunc(fd)
 		fmt.Fprintln(os.Stderr)
 		if err == nil && len(password) == 0 {
 			err = io.ErrUnexpectedEOF
 		}
 		return password, err
 	case os.Getenv("FORCE_STDIN_PROMPTS") == "true":
-		return readLine(prompt)
+		return readLineFunc(prompt)
 	default:
 		return nil, fmt.Errorf("need a terminal to prompt for a password")
 	}
