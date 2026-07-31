@@ -473,13 +473,17 @@ Mixed-Case/Cipher = FIELD_A,FIELD_B
 func TestCache_LibsecretMirror(t *testing.T) {
 	dir := setupCacheTest(t)
 
-	// Create a stub secret-tool that logs its argv to a file.
-	// The stub is prepended to PATH so it shadows any real secret-tool.
+	// Stub secret-tool that logs argv to argsLog AND stdin to stdinLog.
+	// `secret-tool store` reads the secret from stdin (not from a positional
+	// arg), so the stub must capture both channels. The test asserts the
+	// value arrives on stdin and is NOT in argv (the broken positional-arg
+	// code would put it in argv).
 	argsLog := filepath.Join(dir, "secret-tool-args")
+	stdinLog := filepath.Join(dir, "secret-tool-stdin")
 	stubDir := filepath.Join(dir, "bin")
 	os.MkdirAll(stubDir, 0o755)
 	stubPath := filepath.Join(stubDir, "secret-tool")
-	stub := "#!/bin/sh\necho \"$@\" >> " + argsLog + "\n"
+	stub := "#!/bin/sh\necho \"$@\" >> " + argsLog + "\ncat >> " + stdinLog + "\n"
 	if err := os.WriteFile(stubPath, []byte(stub), 0o755); err != nil {
 		t.Skipf("could not create stub: %v", err)
 	}
@@ -503,9 +507,9 @@ bw-key = BW_CLIENTSECRET
 	// reproduces the init-hook scenario where `bitw cache --mirror-libsecret=...`
 	// runs before the cache file is sourced, so no decrypted value is in
 	// the process env. If cmdCache mirrors from os.Getenv (the old bug),
-	// secret-tool would be called with an empty value — overwriting the
-	// existing libsecret mirror with garbage. With the fix, the decrypted
-	// value flows from cmdCache's internal map to secret-tool regardless
+	// secret-tool would receive an empty stdin — overwriting the existing
+	// libsecret mirror with garbage. With the fix, the decrypted value
+	// flows from cmdCache's internal map to secret-tool via stdin regardless
 	// of the env state.
 	os.Unsetenv("BW_CLIENTSECRET")
 	defer os.Unsetenv("BW_CLIENTSECRET")
@@ -524,8 +528,8 @@ bw-key = BW_CLIENTSECRET
 	qt.Assert(t, err, qt.IsNil)
 	qt.Assert(t, strings.Contains(string(data), "export BW_CLIENTSECRET='client-secret-val'"), qt.IsTrue)
 
-	// Verify secret-tool was called with the right arguments AND the
-	// decrypted value (the regression guard for the B1 bug).
+	// Verify secret-tool was called with the right argv: store + label +
+	// collection + attribute. NO trailing value (secret is on stdin).
 	argsData, err := os.ReadFile(argsLog)
 	qt.Assert(t, err, qt.IsNil)
 	argsStr := string(argsData)
@@ -542,11 +546,19 @@ bw-key = BW_CLIENTSECRET
 	// of truth shared with init-hook:20,24.
 	qt.Assert(t, strings.Contains(argsStr, "api-key-secret"), qt.IsTrue,
 		qt.Commentf("mirror must use semantic attr 'api-key-secret' (matches init-hook fallback); got: %q", argsStr))
-	// The critical assertion: the actual decrypted value reached secret-tool,
-	// not an empty string (which would happen if mirrorLibsecretVars read
-	// from os.Getenv under the init-hook scenario).
-	qt.Assert(t, strings.Contains(argsStr, "client-secret-val"), qt.IsTrue,
-		qt.Commentf("secret-tool args must contain decrypted value (not empty); got: %q", argsStr))
+	// CRITICAL: the secret must NOT appear as a positional argv (that
+	// was the broken-positional-arg code; the correct code passes the
+	// secret on stdin). A failure here would also catch a regression to
+	// the old code — the old test asserted Contains(argsStr, value) which
+	// could never have caught the bug.
+	qt.Assert(t, strings.Contains(argsStr, "client-secret-val"), qt.IsFalse,
+		qt.Commentf("secret must NOT be in argv (the secret goes on stdin); got: %q", argsStr))
+
+	// Verify the decrypted value arrived on stdin.
+	stdinData, err := os.ReadFile(stdinLog)
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, strings.Contains(string(stdinData), "client-secret-val"), qt.IsTrue,
+		qt.Commentf("secret must arrive on stdin; got stdinLog: %q", string(stdinData)))
 }
 
 // TestCache_LibsecretMirror_CustomField covers the [cache-fields]→mirror
@@ -559,12 +571,15 @@ bw-key = BW_CLIENTSECRET
 func TestCache_LibsecretMirror_CustomField(t *testing.T) {
 	dir := setupCacheTest(t)
 
-	// Stub secret-tool that logs argv.
+	// Stub secret-tool that logs argv AND stdin. `secret-tool store` reads
+	// the secret from stdin (not from a positional arg), so the stub must
+	// capture both channels. Same pattern as TestCache_LibsecretMirror.
 	argsLog := filepath.Join(dir, "secret-tool-args")
+	stdinLog := filepath.Join(dir, "secret-tool-stdin")
 	stubDir := filepath.Join(dir, "bin")
 	os.MkdirAll(stubDir, 0o755)
 	stubPath := filepath.Join(stubDir, "secret-tool")
-	stub := "#!/bin/sh\necho \"$@\" >> " + argsLog + "\n"
+	stub := "#!/bin/sh\necho \"$@\" >> " + argsLog + "\ncat >> " + stdinLog + "\n"
 	if err := os.WriteFile(stubPath, []byte(stub), 0o755); err != nil {
 		t.Skipf("could not create stub: %v", err)
 	}
@@ -606,15 +621,20 @@ bw-key = BW_CLIENTID
 	qt.Assert(t, strings.Contains(string(data), "export BW_CLIENTID='user.test-uuid-1234'"), qt.IsTrue,
 		qt.Commentf("cache file: %q", string(data)))
 
-	// secret-tool must have been called with the decrypted value as a
-	// positional argument — not an empty string.
+	// secret-tool argv must have the semantic attr name, NOT the value.
 	argsData, err := os.ReadFile(argsLog)
 	qt.Assert(t, err, qt.IsNil)
 	argsStr := string(argsData)
 	qt.Assert(t, strings.Contains(argsStr, "api-key-client-id"), qt.IsTrue,
 		qt.Commentf("mirror must use semantic attr 'api-key-client-id' (matches init-hook fallback); got: %q", argsStr))
-	qt.Assert(t, strings.Contains(argsStr, "user.test-uuid-1234"), qt.IsTrue,
-		qt.Commentf("secret-tool args must contain decrypted custom-field value (not empty); got: %q", argsStr))
+	qt.Assert(t, strings.Contains(argsStr, "user.test-uuid-1234"), qt.IsFalse,
+		qt.Commentf("secret must NOT be in argv (the secret goes on stdin); got: %q", argsStr))
+
+	// secret-tool stdin must contain the decrypted custom-field value.
+	stdinData, err := os.ReadFile(stdinLog)
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, strings.Contains(string(stdinData), "user.test-uuid-1234"), qt.IsTrue,
+		qt.Commentf("secret must arrive on stdin; got stdinLog: %q", string(stdinData)))
 }
 
 // TestCache_LibsecretMirror_MissingKey verifies that requesting a var for

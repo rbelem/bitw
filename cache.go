@@ -266,6 +266,16 @@ func cmdCache(ctx context.Context, args []string) error {
 // so the mirror must use them — not the env var name — or the round-trip
 // silently breaks. (See ADR-0003 §Fallback for the handoff.)
 //
+// CRITICAL: `secret-tool store` reads the secret from STDIN, not from a
+// positional argument. The store argv is `secret-tool store --label=X
+// collection attribute` — exactly one attr pair, no trailing value
+// (otherwise secret-tool would interpret the value as a dangling attribute
+// name and read stdin EOF as an empty password). The mirror follows the
+// same pattern as `storePasswordLibsecret` (`auth.go:323-325`): secret
+// on stdin. The consumer (init-hook's `$(secret-tool lookup …)`)
+// command-substitution strips the trailing newline for us, so no
+// trailing-newline normalization is needed here.
+//
 // If a var was requested for mirror but does not appear in the manifest's
 // decrypted values, we warn on stderr instead of silently writing an empty
 // string to libsecret — an empty credential would clobber any previously-
@@ -288,12 +298,21 @@ func mirrorLibsecretVars(vars string, values map[string]string) {
 		}
 		attr, ok := mirrorAttrFor(v)
 		if !ok {
-			attr = v // unknown var → use the env var name itself (still consistent on read if caller mirrors with the same name)
+			// Unknown var with no semantic-attr mapping → write under the
+			// env var name itself. The init-hook fallback won't be able to
+			// retrieve it (it only knows api-key-secret / api-key-client-id),
+			// so this is a dead write. Warn so the user knows their config
+			// is missing a mapping.
+			fmt.Fprintf(os.Stderr,
+				"warning: --mirror-libsecret var %q has no semantic libsecret attribute mapping; "+
+					"the bash init-hook fallback cannot retrieve it. Add a case in mirrorAttrFor.\n", v)
+			attr = v
 		}
 		cmd := exec.Command("secret-tool", "store",
 			"--label=Bitwarden API key",
-			"bitwarden", attr, val,
+			"bitwarden", attr,
 		)
+		cmd.Stdin = bytes.NewReader([]byte(val))
 		if out, err := cmd.CombinedOutput(); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not mirror %s to libsecret: %v %s\n",
 				v, err, bytes.TrimSpace(out))
