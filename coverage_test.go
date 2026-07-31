@@ -248,6 +248,7 @@ func TestCmdGet_Basic(t *testing.T) {
 
 	// Create a cipher with encrypted fields.
 	cipher := Cipher{
+		Type: CipherLogin,
 		ID:   uuid.MustParse("12345678-1234-1234-1234-123456789012"),
 		Name: encryptForTest(t, "Test Cipher"),
 		Login: &Login{

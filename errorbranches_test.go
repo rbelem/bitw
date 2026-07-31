@@ -341,8 +341,10 @@ func TestBuildPasswordGrant_InvalidKDF(t *testing.T) {
 	qt.Assert(t, err, qt.ErrorMatches, ".*KDF.*")
 }
 
-// TestFindCipherByName_NoLogin verifies that findCipherByName skips ciphers
-// without Login field.
+// TestFindCipherByName_NoLogin verifies that findCipherByName now finds
+// ciphers without a Login field (e.g., secure notes, SSH keys). Previously
+// it skipped non-login ciphers; the per-item-key work changed this so all
+// cipher types are searchable by name.
 func TestFindCipherByName_NoLogin(t *testing.T) {
 	origSecrets := secrets
 	origGlobalData := globalData
@@ -367,13 +369,15 @@ func TestFindCipherByName_NoLogin(t *testing.T) {
 	globalData = dataFile{
 		Sync: SyncData{
 			Ciphers: []Cipher{
-				{Name: encryptForTest(t, "Test")}, // No Login field
+				{Type: CipherNote, Name: encryptForTest(t, "Test")}, // No Login field
 			},
 		},
 	}
 
-	_, err := findCipherByName("Test")
-	qt.Assert(t, err, qt.ErrorMatches, "cipher .* not found")
+	cipher, err := findCipherByName("Test")
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, cipher, qt.IsNotNil)
+	qt.Assert(t, cipher.Type, qt.Equals, CipherNote)
 }
 
 // TestMatch_DecryptError verifies that Match returns false when decryption fails.

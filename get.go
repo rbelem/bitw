@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -22,13 +23,13 @@ func isValidShellIdent(s string) bool {
 	return shellIdentRe.MatchString(s)
 }
 
+// findCipherByName searches all ciphers (not just logins) by decrypted name.
+// Item-key-aware: uses decryptFieldStr so ciphers with per-item keys are
+// correctly matched.
 func findCipherByName(name string) (*Cipher, error) {
 	for i := range globalData.Sync.Ciphers {
 		cipher := &globalData.Sync.Ciphers[i]
-		if cipher.Login == nil {
-			continue
-		}
-		decName, err := secrets.decryptStr(cipher.Name, cipher.OrganizationID)
+		decName, err := secrets.decryptFieldStr(cipher, cipher.Name)
 		if err != nil {
 			continue
 		}
@@ -50,14 +51,16 @@ func (s *stringSliceFlag) Set(v string) error {
 func cmdGet(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("get", flag.ContinueOnError)
 	var envName string
+	var jsonMode bool
 	var fields stringSliceFlag
 	fs.StringVar(&envName, "env-name", "", "variable name for password in default mode")
+	fs.BoolVar(&jsonMode, "json", false, "emit the fully decrypted cipher as JSON")
 	fs.Var(&fields, "field", "field to emit (repeatable); triggers field mode")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: bitw get [--env-name NAME] [--field FIELD] <cipher-name>")
+		return fmt.Errorf("usage: bitw get [--env-name NAME] [--json] [--field FIELD] <cipher-name>")
 	}
 	cipherName := fs.Arg(0)
 
@@ -65,13 +68,17 @@ func cmdGet(ctx context.Context, args []string) error {
 	if _, err := secrets.password(); err != nil {
 		return err
 	}
+	if err := secrets.initKeys(); err != nil {
+		return err
+	}
 
 	cipher, err := findCipherByName(cipherName)
 	if err != nil {
 		return err
 	}
-	if cipher.Login == nil {
-		return fmt.Errorf("cipher %q is not a login", cipherName)
+
+	if jsonMode {
+		return emitCipherJSON(cipher)
 	}
 
 	if len(fields) > 0 {
@@ -89,8 +96,25 @@ func cmdGet(ctx context.Context, args []string) error {
 		return nil
 	}
 
-	// Default mode: emit shell-eval export lines.
-	password, err := secrets.decryptStr(cipher.Login.Password, cipher.OrganizationID)
+	// Default mode: depends on cipher type.
+	switch cipher.Type {
+	case CipherLogin:
+		return emitLoginExports(cipher, envName)
+	case CipherNote:
+		return emitNoteExport(cipher, envName)
+	case CipherSshKey:
+		return emitNoteExport(cipher, envName)
+	default:
+		return fmt.Errorf("cipher %q has unsupported type %d", cipherName, cipher.Type)
+	}
+}
+
+// emitLoginExports emits shell-eval export lines for a login cipher.
+func emitLoginExports(cipher *Cipher, envName string) error {
+	if cipher.Login == nil {
+		return nil
+	}
+	password, err := secrets.decryptFieldStr(cipher, cipher.Login.Password)
 	if err != nil {
 		return fmt.Errorf("could not decrypt password: %v", err)
 	}
@@ -105,7 +129,7 @@ func cmdGet(ctx context.Context, args []string) error {
 	}
 
 	for _, field := range cipher.Fields {
-		name, err := secrets.decryptStr(field.Name, cipher.OrganizationID)
+		name, err := secrets.decryptFieldStr(cipher, field.Name)
 		if err != nil {
 			return fmt.Errorf("could not decrypt field name: %v", err)
 		}
@@ -113,7 +137,7 @@ func cmdGet(ctx context.Context, args []string) error {
 			fmt.Fprintf(os.Stderr, "warning: skipping field with invalid shell identifier %q\n", name)
 			continue
 		}
-		val, err := secrets.decryptStr(field.Value, cipher.OrganizationID)
+		val, err := secrets.decryptFieldStr(cipher, field.Value)
 		if err != nil {
 			return fmt.Errorf("could not decrypt field %q: %v", name, err)
 		}
@@ -125,31 +149,182 @@ func cmdGet(ctx context.Context, args []string) error {
 	return nil
 }
 
+// emitNoteExport emits export NOTES='...' for non-login ciphers.
+func emitNoteExport(cipher *Cipher, envName string) error {
+	var notes string
+	if cipher.Notes != nil {
+		var err error
+		notes, err = secrets.decryptFieldStr(cipher, *cipher.Notes)
+		if err != nil {
+			return fmt.Errorf("could not decrypt notes: %v", err)
+		}
+	}
+	nVar := envName
+	if nVar == "" {
+		nVar = "NOTES"
+	}
+	if !isValidShellIdent(nVar) {
+		fmt.Fprintf(os.Stderr, "warning: skipping invalid shell identifier %q\n", nVar)
+	} else if notes != "" {
+		fmt.Printf("export %s=%s\n", nVar, shellQuote(notes))
+	}
+	return nil
+}
+
+// jsonCipher* types model the --json output schema.
+type jsonCipherOutput struct {
+	Type         CipherType        `json:"type"`
+	ID           string            `json:"id"`
+	Name         string            `json:"name"`
+	Notes        string            `json:"notes,omitempty"`
+	RevisionDate string            `json:"revisionDate"`
+	Login        *jsonCipherLogin  `json:"login,omitempty"`
+	SshKey       *jsonCipherSshKey `json:"sshKey,omitempty"`
+	Fields       []jsonCipherField `json:"fields,omitempty"`
+}
+
+type jsonCipherLogin struct {
+	Username string `json:"username,omitempty"`
+	Password string `json:"password,omitempty"`
+	URI      string `json:"uri,omitempty"`
+}
+
+type jsonCipherSshKey struct {
+	PrivateKey string `json:"privateKey,omitempty"`
+	PublicKey  string `json:"publicKey,omitempty"`
+}
+
+type jsonCipherField struct {
+	Name  string `json:"name,omitempty"`
+	Value string `json:"value,omitempty"`
+}
+
+// emitCipherJSON emits the fully decrypted cipher as JSON on stdout.
+func emitCipherJSON(cipher *Cipher) error {
+	out := jsonCipherOutput{
+		Type:         cipher.Type,
+		ID:           cipher.ID.String(),
+		RevisionDate: cipher.RevisionDate.Format("2006-01-02T15:04:05Z07:00"),
+	}
+
+	name, err := secrets.decryptFieldStr(cipher, cipher.Name)
+	if err != nil {
+		return fmt.Errorf("could not decrypt name: %v", err)
+	}
+	out.Name = name
+
+	if cipher.Notes != nil {
+		notes, err := secrets.decryptFieldStr(cipher, *cipher.Notes)
+		if err != nil {
+			return fmt.Errorf("could not decrypt notes: %v", err)
+		}
+		out.Notes = notes
+	}
+
+	if cipher.Login != nil {
+		login := &jsonCipherLogin{}
+		if !cipher.Login.Username.IsZero() {
+			login.Username, err = secrets.decryptFieldStr(cipher, cipher.Login.Username)
+			if err != nil {
+				return fmt.Errorf("could not decrypt username: %v", err)
+			}
+		}
+		if !cipher.Login.Password.IsZero() {
+			login.Password, err = secrets.decryptFieldStr(cipher, cipher.Login.Password)
+			if err != nil {
+				return fmt.Errorf("could not decrypt password: %v", err)
+			}
+		}
+		if !cipher.Login.URI.IsZero() {
+			login.URI, err = secrets.decryptFieldStr(cipher, cipher.Login.URI)
+			if err != nil {
+				return fmt.Errorf("could not decrypt URI: %v", err)
+			}
+		}
+		out.Login = login
+	}
+
+	if cipher.SshKey != nil {
+		sshKey := &jsonCipherSshKey{}
+		if !cipher.SshKey.PrivateKey.IsZero() {
+			sshKey.PrivateKey, err = secrets.decryptFieldStr(cipher, cipher.SshKey.PrivateKey)
+			if err != nil {
+				return fmt.Errorf("could not decrypt privateKey: %v", err)
+			}
+		}
+		if !cipher.SshKey.PublicKey.IsZero() {
+			sshKey.PublicKey, err = secrets.decryptFieldStr(cipher, cipher.SshKey.PublicKey)
+			if err != nil {
+				return fmt.Errorf("could not decrypt publicKey: %v", err)
+			}
+		}
+		out.SshKey = sshKey
+	}
+
+	for _, f := range cipher.Fields {
+		fName, err := secrets.decryptFieldStr(cipher, f.Name)
+		if err != nil {
+			return fmt.Errorf("could not decrypt field name: %v", err)
+		}
+		fVal, err := secrets.decryptFieldStr(cipher, f.Value)
+		if err != nil {
+			return fmt.Errorf("could not decrypt field value: %v", err)
+		}
+		out.Fields = append(out.Fields, jsonCipherField{Name: fName, Value: fVal})
+	}
+
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(out)
+}
+
+// resolveField decrypts a named field from a cipher, item-key aware.
 func resolveField(cipher *Cipher, field string) (string, error) {
-	orgID := cipher.OrganizationID
 	switch field {
 	case "password":
-		return secrets.decryptStr(cipher.Login.Password, orgID)
+		if cipher.Login == nil {
+			return "", nil
+		}
+		return secrets.decryptFieldStr(cipher, cipher.Login.Password)
 	case "username":
-		return secrets.decryptStr(cipher.Login.Username, orgID)
+		if cipher.Login == nil {
+			return "", nil
+		}
+		return secrets.decryptFieldStr(cipher, cipher.Login.Username)
 	case "notes":
 		if cipher.Notes == nil {
 			return "", nil
 		}
-		return secrets.decryptStr(*cipher.Notes, orgID)
+		return secrets.decryptFieldStr(cipher, *cipher.Notes)
 	case "totp":
+		if cipher.Login == nil {
+			return "", nil
+		}
 		return cipher.Login.Totp, nil
 	case "uri":
-		return secrets.decryptStr(cipher.Login.URI, orgID)
+		if cipher.Login == nil {
+			return "", nil
+		}
+		return secrets.decryptFieldStr(cipher, cipher.Login.URI)
+	case "privatekey":
+		if cipher.SshKey == nil {
+			return "", nil
+		}
+		return secrets.decryptFieldStr(cipher, cipher.SshKey.PrivateKey)
+	case "publickey":
+		if cipher.SshKey == nil {
+			return "", nil
+		}
+		return secrets.decryptFieldStr(cipher, cipher.SshKey.PublicKey)
 	default:
 		// Search custom fields by name.
 		for _, f := range cipher.Fields {
-			name, err := secrets.decryptStr(f.Name, orgID)
+			name, err := secrets.decryptFieldStr(cipher, f.Name)
 			if err != nil {
 				return "", fmt.Errorf("could not decrypt field name: %v", err)
 			}
 			if name == field {
-				return secrets.decryptStr(f.Value, orgID)
+				return secrets.decryptFieldStr(cipher, f.Value)
 			}
 		}
 		return "", fmt.Errorf("field %q not found in cipher", field)

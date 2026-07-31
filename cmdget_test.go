@@ -36,6 +36,7 @@ func TestCmdGet_FieldMode_AllFields(t *testing.T) {
 
 	notes := encryptStr(t, "test notes")
 	cipher := Cipher{
+		Type: CipherLogin,
 		Name: encryptStr(t, "Test Cipher"),
 		Login: &Login{
 			Username: encryptStr(t, "testuser"),
@@ -103,6 +104,7 @@ func TestCmdGet_FieldMode_CustomField(t *testing.T) {
 	secrets.initKeys()
 
 	cipher := Cipher{
+		Type: CipherLogin,
 		Name: encryptStr(t, "Test Cipher"),
 		Login: &Login{
 			Password: encryptStr(t, "testpass"),
@@ -161,6 +163,7 @@ func TestCmdGet_FieldMode_EmptyValueSkipped(t *testing.T) {
 	secrets.initKeys()
 
 	cipher := Cipher{
+		Type: CipherLogin,
 		Name: encryptStr(t, "Test Cipher"),
 		Login: &Login{
 			Password: encryptStr(t, ""), // Empty password
@@ -215,6 +218,7 @@ func TestCmdGet_DefaultMode_InvalidEnvName(t *testing.T) {
 	secrets.initKeys()
 
 	cipher := Cipher{
+		Type: CipherLogin,
 		Name: encryptStr(t, "Test Cipher"),
 		Login: &Login{
 			Password: encryptStr(t, "testpass"),
@@ -266,6 +270,7 @@ func TestCmdGet_DefaultMode_InvalidFieldName(t *testing.T) {
 	secrets.initKeys()
 
 	cipher := Cipher{
+		Type: CipherLogin,
 		Name: encryptStr(t, "Test Cipher"),
 		Login: &Login{
 			Password: encryptStr(t, "testpass"),
@@ -323,6 +328,7 @@ func TestCmdGet_DefaultMode_EmptyFieldValueSkipped(t *testing.T) {
 	secrets.initKeys()
 
 	cipher := Cipher{
+		Type: CipherLogin,
 		Name: encryptStr(t, "Test Cipher"),
 		Login: &Login{
 			Password: encryptStr(t, "testpass"),
