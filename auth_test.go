@@ -484,23 +484,29 @@ cat > %s
 }
 
 // TestPromptWithAskpass_PriorityChain verifies the priority: zenity > kdialog > SSH_ASKPASS > terminal.
+//
+// Each subtest uses fakeExec (defined in exec_test.go) rather than
+// PATH-stubbing fake executables, because the test runner's blockingExec
+// wrapper (in prompt_helpers_test.go) intercepts shell.LookPath by name
+// and would skip PATH-based fake binaries. fakeExec gives explicit
+// control over LookPath and Output for each tool, and is the same
+// pattern used by TestPromptWithAskpass_Zenity/Kdialog/SSH_ASKPASS in
+// exec_test.go.
 func TestPromptWithAskpass_PriorityChain(t *testing.T) {
-	// Create fake executables in temp dirs.
-	makeFake := func(dir, name, output string) {
-		t.Helper()
-		path := filepath.Join(dir, name)
-		err := os.WriteFile(path, []byte(fmt.Sprintf("#!/bin/sh\necho %s\n", output)), 0o755)
-		qt.Assert(t, err, qt.IsNil)
-	}
-
 	t.Run("zenity_wins", func(t *testing.T) {
-		dir := t.TempDir()
-		makeFake(dir, "zenity", "zenity-password")
-		makeFake(dir, "kdialog", "kdialog-password")
-		oldPath := os.Getenv("PATH")
-		os.Setenv("PATH", dir+":"+oldPath)
-		defer os.Setenv("PATH", oldPath)
-		os.Unsetenv("SSH_ASKPASS")
+		fake := &fakeExec{
+			lookPathFn: func(name string) (string, error) {
+				if name == "zenity" {
+					return "/fake/zenity", nil
+				}
+				return "", fmt.Errorf("not found")
+			},
+			outputFn: func(env []string, name string, args ...string) ([]byte, error) {
+				return []byte("zenity-password\n"), nil
+			},
+		}
+		useFakeExec(t, fake)
+		t.Setenv("SSH_ASKPASS", "")
 
 		out, err := promptWithAskpass("test prompt")
 		qt.Assert(t, err, qt.IsNil)
@@ -508,13 +514,19 @@ func TestPromptWithAskpass_PriorityChain(t *testing.T) {
 	})
 
 	t.Run("kdialog_when_no_zenity", func(t *testing.T) {
-		dir := t.TempDir()
-		makeFake(dir, "kdialog", "kdialog-password")
-		oldPath := os.Getenv("PATH")
-		// Set PATH to only include our dir (no zenity).
-		os.Setenv("PATH", dir)
-		defer os.Setenv("PATH", oldPath)
-		os.Unsetenv("SSH_ASKPASS")
+		fake := &fakeExec{
+			lookPathFn: func(name string) (string, error) {
+				if name == "kdialog" {
+					return "/fake/kdialog", nil
+				}
+				return "", fmt.Errorf("not found")
+			},
+			outputFn: func(env []string, name string, args ...string) ([]byte, error) {
+				return []byte("kdialog-password\n"), nil
+			},
+		}
+		useFakeExec(t, fake)
+		t.Setenv("SSH_ASKPASS", "")
 
 		out, err := promptWithAskpass("test prompt")
 		qt.Assert(t, err, qt.IsNil)
@@ -527,11 +539,19 @@ func TestPromptWithAskpass_PriorityChain(t *testing.T) {
 		err := os.WriteFile(askpassScript, []byte("#!/bin/sh\necho askpass-password\n"), 0o755)
 		qt.Assert(t, err, qt.IsNil)
 
-		oldPath := os.Getenv("PATH")
-		os.Setenv("PATH", dir) // no zenity, no kdialog
-		defer os.Setenv("PATH", oldPath)
-		os.Setenv("SSH_ASKPASS", askpassScript)
-		defer os.Unsetenv("SSH_ASKPASS")
+		fake := &fakeExec{
+			lookPathFn: func(name string) (string, error) {
+				if name == askpassScript {
+					return askpassScript, nil
+				}
+				return "", fmt.Errorf("not found")
+			},
+			outputFn: func(env []string, name string, args ...string) ([]byte, error) {
+				return []byte("askpass-password\n"), nil
+			},
+		}
+		useFakeExec(t, fake)
+		t.Setenv("SSH_ASKPASS", askpassScript)
 
 		out, err := promptWithAskpass("test prompt")
 		qt.Assert(t, err, qt.IsNil)
