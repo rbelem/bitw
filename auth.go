@@ -182,7 +182,8 @@ func loginApiKey(ctx context.Context) error {
 // Used by the interactive login flow where clear feedback about the password
 // source is important — the user needs to know whether they're being prompted
 // or whether the password is being read silently from the keyring (e.g.,
-// stored by a prior `bitw login` or by secrets-setup).
+// stored by a prior `bitw login`). The former `bin/secrets-setup` bash
+// script that did the same store was removed in Phase 5.
 //
 // If libsecret has a stored password, returns it with a stderr note. If not,
 // falls through to passwordPromptFunc (the overridable var, defaulting to
@@ -331,15 +332,17 @@ func storePasswordLibsecret(password []byte) {
 }
 
 func buildApiKeyGrant() (url.Values, error) {
-	// Env-first per ADR-0003 §Context (auth.go:338-339). The Go binary
-	// never reads libsecret directly; the bash init-hook consumes the
-	// libsecret mirror and populates the shell env. The crypto.go
-	// fallback (secrets.clientId() / secrets.clientSecret() at
-	// crypto.go:137,153) is for *interactive prompts*, not libsecret —
-	// if env is empty and there's no TTY, `bitw` errors with
-	// "need a terminal to prompt for a password" for what is actually a
-	// missing API key. Without env-first priority, users with creds only
-	// in env get a silent fallthrough to password grant.
+	// Env-first per ADR-0003 §Context. The Go binary never reads libsecret
+	// directly for THESE credentials (the API key); the bash init-hook
+	// consumes the libsecret mirror and populates the shell env. The
+	// crypto.go fallback chain (secrets.clientId() / secrets.clientSecret()
+	// below) is for *interactive prompts*, not libsecret — if env is
+	// empty and there's no TTY, `bitw` errors with "need a terminal to
+	// prompt for a password" for what is actually a missing API key.
+	// (Note: the master password itself is a separate libsecret lookup;
+	// see `crypto.go:124` for that path.)
+	// Without env-first priority, users with creds only in env get a
+	// silent fallthrough to password grant.
 	clientId := os.Getenv("BW_CLIENTID")
 	clientSecret := os.Getenv("BW_CLIENTSECRET")
 	if clientId == "" || clientSecret == "" {

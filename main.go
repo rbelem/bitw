@@ -129,7 +129,8 @@ func termPasswordPrompt(prompt string) ([]byte, error) {
 }
 
 // promptWithAskpass tries GUI/SSH_ASKPASS programs before falling back to terminal.
-// Mirrors devbox-global/bin/secrets-setup's prompt_password helper.
+// Mirrors the priority order the prior bash `bin/secrets-setup` and
+// `bin/bitw-login` wrappers used before they were removed in Phase 5/7.
 func promptWithAskpass(prompt string) ([]byte, error) {
 	// 1. zenity (GTK dialog — works on KDE too)
 	if path, _ := exec.LookPath("zenity"); path != "" {

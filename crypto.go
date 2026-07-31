@@ -104,7 +104,9 @@ func (c *secretCache) password() ([]byte, error) {
 	}
 	// Try libsecret cache before falling back to the interactive prompt.
 	// The cache is populated by `secret-tool store --label="Bitwarden"
-	// bitwarden master-password` (see devbox-global bin/secrets-setup).
+	// bitwarden master-password` (see `bitw login`'s
+	// `storePasswordLibsecret` at `auth.go:316`; the previous bash
+	// wrapper `bin/secrets-setup` that did this was removed in Phase 5).
 	// Lookup failures are silent: we fall through to passwordPrompt.
 	if pw, err := readLibsecretPassword(); err == nil && len(pw) > 0 {
 		c._password = pw

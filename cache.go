@@ -39,6 +39,7 @@ func cmdCache(ctx context.Context, args []string) error {
 	var configPath string
 	var outputPath string
 	var mirrorLibsecret string
+	var timeout time.Duration
 
 	xdgRuntime := os.Getenv("XDG_RUNTIME_DIR")
 	if xdgRuntime == "" {
@@ -56,9 +57,16 @@ func cmdCache(ctx context.Context, args []string) error {
 	fs.StringVar(&configPath, "config", defaultConfig, "path to cache manifest (INI)")
 	fs.StringVar(&outputPath, "output", defaultOutput, "path to write cache file")
 	fs.StringVar(&mirrorLibsecret, "mirror-libsecret", "", "comma-separated env vars to mirror to libsecret")
+	fs.DurationVar(&timeout, "timeout", 0, "abort the whole command after this duration (0 = no timeout); recommended for init-hook paths so a hung re-auth does not block shell startup")
 
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
 	}
 
 	// Load manifest.
