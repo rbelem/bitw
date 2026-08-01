@@ -39,10 +39,12 @@ const (
 type secretCache struct {
 	data *dataFile
 
-	_password     []byte // cached, to avoid repeated prompts
-	_configEmail  string
-	_clientId     []byte
-	_clientSecret []byte
+	_password           []byte // cached, to avoid repeated prompts
+	_configEmail        string
+	_configClientID     string
+	_configClientSecret string
+	_clientId           []byte
+	_clientSecret       []byte
 
 	// TODO: store these more securely
 	key    []byte
@@ -140,6 +142,10 @@ func (c *secretCache) clientId() ([]byte, error) {
 		c._clientId = []byte(s)
 		return c._clientId, nil
 	}
+	if c._configClientID != "" {
+		c._clientId = []byte(c._configClientID)
+		return c._clientId, nil
+	}
 	return nil, nil
 }
 
@@ -149,6 +155,10 @@ func (c *secretCache) clientSecret() ([]byte, error) {
 	}
 	if s := os.Getenv("BW_CLIENTSECRET"); s != "" {
 		c._clientSecret = []byte(s)
+		return c._clientSecret, nil
+	}
+	if c._configClientSecret != "" {
+		c._clientSecret = []byte(c._configClientSecret)
 		return c._clientSecret, nil
 	}
 	return nil, nil

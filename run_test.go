@@ -192,3 +192,28 @@ func TestDispatch_Login(t *testing.T) {
 	err := dispatch(context.Background(), []string{"login"})
 	qt.Assert(t, err, qt.IsNotNil)
 }
+
+// TestLoadConfig_ClientCredentials verifies that loadConfig accepts
+// clientid/clientsecret keys and stores them in the secretCache.
+func TestLoadConfig_ClientCredentials(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config")
+	err := os.WriteFile(configPath, []byte(`
+email = test@example.com
+clientid = config-client-id
+clientsecret = config-client-secret
+`), 0o600)
+	qt.Assert(t, err, qt.IsNil)
+
+	origSecrets := secrets
+	t.Cleanup(func() {
+		secrets = origSecrets
+	})
+
+	secrets = secretCache{}
+	err = loadConfig(tmpDir)
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, secrets._configEmail, qt.Equals, "test@example.com")
+	qt.Assert(t, secrets._configClientID, qt.Equals, "config-client-id")
+	qt.Assert(t, secrets._configClientSecret, qt.Equals, "config-client-secret")
+}

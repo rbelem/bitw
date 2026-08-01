@@ -847,3 +847,75 @@ func TestInitKeys_OrgKey_RSAOAEP(t *testing.T) {
 	qt.Assert(t, secrets.orgKeys[orgID.String()], qt.DeepEquals, orgKeyMaterial[0:32])
 	qt.Assert(t, secrets.orgMacKeys[orgID.String()], qt.DeepEquals, orgKeyMaterial[32:64])
 }
+
+// TestClientId_ConfigFallback verifies that clientId() returns the config
+// value when env var is unset.
+func TestClientId_ConfigFallback(t *testing.T) {
+	origSecrets := secrets
+	origClientID := os.Getenv("BW_CLIENTID")
+	t.Cleanup(func() {
+		secrets = origSecrets
+		os.Setenv("BW_CLIENTID", origClientID)
+	})
+
+	os.Unsetenv("BW_CLIENTID")
+	secrets = secretCache{_configClientID: "config-client-id"}
+
+	id, err := secrets.clientId()
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, string(id), qt.Equals, "config-client-id")
+}
+
+// TestClientId_EnvOverridesConfig verifies that env var takes precedence
+// over config value.
+func TestClientId_EnvOverridesConfig(t *testing.T) {
+	origSecrets := secrets
+	origClientID := os.Getenv("BW_CLIENTID")
+	t.Cleanup(func() {
+		secrets = origSecrets
+		os.Setenv("BW_CLIENTID", origClientID)
+	})
+
+	os.Setenv("BW_CLIENTID", "env-client-id")
+	secrets = secretCache{_configClientID: "config-client-id"}
+
+	id, err := secrets.clientId()
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, string(id), qt.Equals, "env-client-id")
+}
+
+// TestClientSecret_ConfigFallback verifies that clientSecret() returns the
+// config value when env var is unset.
+func TestClientSecret_ConfigFallback(t *testing.T) {
+	origSecrets := secrets
+	origClientSecret := os.Getenv("BW_CLIENTSECRET")
+	t.Cleanup(func() {
+		secrets = origSecrets
+		os.Setenv("BW_CLIENTSECRET", origClientSecret)
+	})
+
+	os.Unsetenv("BW_CLIENTSECRET")
+	secrets = secretCache{_configClientSecret: "config-client-secret"}
+
+	secret, err := secrets.clientSecret()
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, string(secret), qt.Equals, "config-client-secret")
+}
+
+// TestClientSecret_EnvOverridesConfig verifies that env var takes precedence
+// over config value.
+func TestClientSecret_EnvOverridesConfig(t *testing.T) {
+	origSecrets := secrets
+	origClientSecret := os.Getenv("BW_CLIENTSECRET")
+	t.Cleanup(func() {
+		secrets = origSecrets
+		os.Setenv("BW_CLIENTSECRET", origClientSecret)
+	})
+
+	os.Setenv("BW_CLIENTSECRET", "env-client-secret")
+	secrets = secretCache{_configClientSecret: "config-client-secret"}
+
+	secret, err := secrets.clientSecret()
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, string(secret), qt.Equals, "env-client-secret")
+}

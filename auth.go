@@ -143,21 +143,25 @@ const (
 )
 
 // login is the top-level dispatcher for `bitw login`.
-// Skips everything if BOTH BW_CLIENTID and BW_CLIENTSECRET are set.
+// Skips everything if client credentials are available (env OR config).
 // Otherwise, interactive flow: server selection, email, master password,
 // 2FA (if enabled), libsecret storage.
 func login(ctx context.Context) error {
-	hasId := os.Getenv("BW_CLIENTID") != ""
-	hasSecret := os.Getenv("BW_CLIENTSECRET") != ""
+	clientId, _ := secrets.clientId()
+	clientSecret, _ := secrets.clientSecret()
+	hasId := clientId != nil
+	hasSecret := clientSecret != nil
 
 	switch {
 	case hasId && hasSecret:
 		return loginApiKey(ctx)
 	case hasId != hasSecret:
 		return fmt.Errorf(
-			"BW_CLIENTID and BW_CLIENTSECRET must both be set or both be empty; "+
-				"got BW_CLIENTID=%t, BW_CLIENTSECRET=%t. "+
-				"Set both for API key login, or unset both for interactive login",
+			"client id and client secret must both be set or both be empty; "+
+				"got id=%t, secret=%t. "+
+				"Set both (via BW_CLIENTID/BW_CLIENTSECRET env vars or "+
+				"clientid/clientsecret in the bitw config) for API key login, "+
+				"or unset both for interactive login",
 			hasId, hasSecret)
 	default:
 		return loginInteractive(ctx)
@@ -329,18 +333,23 @@ func storePasswordLibsecret(password []byte) {
 }
 
 func buildApiKeyGrant() (url.Values, error) {
-	// Env-only per design: BW_CLIENTID/BW_CLIENTSECRET must be explicitly
-	// set by the user. No interactive prompts, no libsecret lookup for
-	// these credentials. If not set, the caller should fall back to
-	// password-grant login.
-	clientId := os.Getenv("BW_CLIENTID")
-	clientSecret := os.Getenv("BW_CLIENTSECRET")
-	if clientId == "" || clientSecret == "" {
-		return nil, fmt.Errorf("client_credentials requires BW_CLIENTID and BW_CLIENTSECRET env vars")
+	// Resolution order: env vars first, then bitw config file.
+	// Never prompts interactively. If neither source provides both values,
+	// the caller should fall back to password-grant login.
+	clientId, err := secrets.clientId()
+	if err != nil {
+		return nil, err
+	}
+	clientSecret, err := secrets.clientSecret()
+	if err != nil {
+		return nil, err
+	}
+	if clientId == nil || clientSecret == nil {
+		return nil, fmt.Errorf("client_credentials requires BW_CLIENTID/BW_CLIENTSECRET env vars or clientid/clientsecret in the bitw config")
 	}
 	return urlValues(
-		"client_id", clientId,
-		"client_secret", clientSecret,
+		"client_id", string(clientId),
+		"client_secret", string(clientSecret),
 		"scope", loginApiKeyScope,
 		"grant_type", "client_credentials",
 		"deviceType", deviceType(),
@@ -459,13 +468,15 @@ func refreshToken(ctx context.Context) error {
 		return fmt.Errorf("no refresh token available; re-login required")
 	}
 
-	// If BW_CLIENTID/BW_CLIENTSECRET are set, use the refresh_token grant
-	// with client_credentials (the original path).
-	if os.Getenv("BW_CLIENTID") != "" && os.Getenv("BW_CLIENTSECRET") != "" {
+	// If client credentials are available (from env OR config), use the
+	// refresh_token grant with client_credentials.
+	clientId, _ := secrets.clientId()
+	clientSecret, _ := secrets.clientSecret()
+	if clientId != nil && clientSecret != nil {
 		return refreshTokenWithClientCreds(ctx)
 	}
 
-	// No client credentials in env → fall back to password-grant re-login.
+	// No client credentials available → fall back to password-grant re-login.
 	// This uses the cached email + master password (from libsecret or
 	// PASSWORD env) and prompts for TOTP if the server requires 2FA.
 	return reloginPasswordGrant(ctx)

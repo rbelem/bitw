@@ -253,7 +253,8 @@ func resolveConfigDir() (string, error) {
 }
 
 // loadConfig reads <dir>/config into the global `config` and applies
-// email/apiurl/identityurl keys; errors on sections or unknown keys.
+// email/apiurl/identityurl/clientid/clientsecret keys; errors on sections
+// or unknown keys.
 func loadConfig(dir string) error {
 	var err error
 	config, err = ini.LoadFile(filepath.Join(dir, "config"))
@@ -273,6 +274,10 @@ func loadConfig(dir string) error {
 				apiURL = section.Get(key)
 			case "identityurl":
 				idtURL = section.Get(key)
+			case "clientid":
+				secrets._configClientID = section.Get(key)
+			case "clientsecret":
+				secrets._configClientSecret = section.Get(key)
 			default:
 				return fmt.Errorf("unknown config key: %q", key)
 			}

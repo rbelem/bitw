@@ -560,8 +560,8 @@ func TestPromptWithAskpass_PriorityChain(t *testing.T) {
 }
 
 // TestLogin_BothEnvAndLibsecret_EnvWins verifies that when BW_CLIENTID is set
-// in env AND secretCache has different values (simulating libsecret), the env
-// values are used in the request.
+// in env AND the config file has different values, the env values are used
+// in the request (env takes precedence over config).
 func TestLogin_BothEnvAndLibsecret_EnvWins(t *testing.T) {
 	var receivedClientId, receivedClientSecret string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -590,11 +590,11 @@ func TestLogin_BothEnvAndLibsecret_EnvWins(t *testing.T) {
 	os.Setenv("BW_CLIENTID", "env-client-id")
 	os.Setenv("BW_CLIENTSECRET", "env-client-secret")
 
-	// Set secretCache to different values (simulating libsecret)
+	// Set config values to different values; env should take precedence.
 	secrets = secretCache{
-		data:          &globalData,
-		_clientId:     []byte("libsecret-client-id"),
-		_clientSecret: []byte("libsecret-client-secret"),
+		data:                &globalData,
+		_configClientID:     "config-client-id",
+		_configClientSecret: "config-client-secret",
 	}
 
 	ctx := context.Background()
@@ -605,31 +605,26 @@ func TestLogin_BothEnvAndLibsecret_EnvWins(t *testing.T) {
 	qt.Assert(t, receivedClientSecret, qt.Equals, "env-client-secret")
 }
 
-// TestLogin_NoEnv_NoClientCreds verifies that when BW_CLIENTID is NOT set
-// in env, loginApiKey returns an error (no libsecret fallback for client creds).
+// TestLogin_NoEnv_NoClientCreds verifies that when neither env nor config
+// provides client credentials, loginApiKey returns an error.
 func TestLogin_NoEnv_NoClientCreds(t *testing.T) {
+	origSecrets := secrets
 	origClientID := os.Getenv("BW_CLIENTID")
 	origClientSecret := os.Getenv("BW_CLIENTSECRET")
 	t.Cleanup(func() {
+		secrets = origSecrets
 		os.Setenv("BW_CLIENTID", origClientID)
 		os.Setenv("BW_CLIENTSECRET", origClientSecret)
 	})
 
 	os.Unsetenv("BW_CLIENTID")
 	os.Unsetenv("BW_CLIENTSECRET")
-
-	// Set secretCache values (simulating libsecret) — but these should NOT
-	// be used for client credentials anymore.
-	secrets = secretCache{
-		data:          &globalData,
-		_clientId:     []byte("libsecret-client-id"),
-		_clientSecret: []byte("libsecret-client-secret"),
-	}
+	secrets = secretCache{data: &globalData}
 
 	ctx := context.Background()
 	err := loginApiKey(ctx)
 	qt.Assert(t, err, qt.IsNotNil)
-	qt.Assert(t, err.Error(), qt.Contains, "client_credentials requires BW_CLIENTID and BW_CLIENTSECRET env vars")
+	qt.Assert(t, err.Error(), qt.Contains, "client_credentials requires BW_CLIENTID/BW_CLIENTSECRET env vars or clientid/clientsecret in the bitw config")
 }
 
 // TestLogin_HeadersMatchUpstream verifies that all 5 central headers on every

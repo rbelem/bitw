@@ -110,21 +110,25 @@ func TestBuildApiKeyGrant_EnvVars(t *testing.T) {
 }
 
 // TestBuildApiKeyGrant_NoEnvVars verifies that buildApiKeyGrant returns an
-// error when BW_CLIENTID and BW_CLIENTSECRET are not set (no prompt).
+// error when BW_CLIENTID and BW_CLIENTSECRET are not set and no config
+// provides them (no prompt).
 func TestBuildApiKeyGrant_NoEnvVars(t *testing.T) {
+	origSecrets := secrets
 	origClientID := os.Getenv("BW_CLIENTID")
 	origClientSecret := os.Getenv("BW_CLIENTSECRET")
 	t.Cleanup(func() {
+		secrets = origSecrets
 		os.Setenv("BW_CLIENTID", origClientID)
 		os.Setenv("BW_CLIENTSECRET", origClientSecret)
 	})
 
 	os.Unsetenv("BW_CLIENTID")
 	os.Unsetenv("BW_CLIENTSECRET")
+	secrets = secretCache{}
 
 	_, err := buildApiKeyGrant()
 	qt.Assert(t, err, qt.IsNotNil)
-	qt.Assert(t, err.Error(), qt.Contains, "client_credentials requires BW_CLIENTID and BW_CLIENTSECRET env vars")
+	qt.Assert(t, err.Error(), qt.Contains, "client_credentials requires BW_CLIENTID/BW_CLIENTSECRET env vars or clientid/clientsecret in the bitw config")
 }
 
 // TestRefreshToken_Success verifies that refreshToken succeeds when the server
@@ -510,4 +514,127 @@ func TestRefreshToken_FallbackNoEmail(t *testing.T) {
 	err := refreshToken(context.Background())
 	qt.Assert(t, err, qt.IsNotNil)
 	qt.Assert(t, err.Error(), qt.Contains, "no email available")
+}
+
+// TestBuildApiKeyGrant_ConfigOnly verifies that buildApiKeyGrant succeeds
+// when client credentials come from the config file (no env vars).
+func TestBuildApiKeyGrant_ConfigOnly(t *testing.T) {
+	origSecrets := secrets
+	origClientID := os.Getenv("BW_CLIENTID")
+	origClientSecret := os.Getenv("BW_CLIENTSECRET")
+	t.Cleanup(func() {
+		secrets = origSecrets
+		os.Setenv("BW_CLIENTID", origClientID)
+		os.Setenv("BW_CLIENTSECRET", origClientSecret)
+	})
+
+	os.Unsetenv("BW_CLIENTID")
+	os.Unsetenv("BW_CLIENTSECRET")
+	secrets = secretCache{
+		_configClientID:     "config-client-id",
+		_configClientSecret: "config-client-secret",
+	}
+
+	values, err := buildApiKeyGrant()
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, values.Get("client_id"), qt.Equals, "config-client-id")
+	qt.Assert(t, values.Get("client_secret"), qt.Equals, "config-client-secret")
+	qt.Assert(t, values.Get("grant_type"), qt.Equals, "client_credentials")
+}
+
+// TestBuildApiKeyGrant_NeitherEnvNorConfig verifies that buildApiKeyGrant
+// returns an error when neither env nor config provides client credentials.
+func TestBuildApiKeyGrant_NeitherEnvNorConfig(t *testing.T) {
+	origSecrets := secrets
+	origClientID := os.Getenv("BW_CLIENTID")
+	origClientSecret := os.Getenv("BW_CLIENTSECRET")
+	t.Cleanup(func() {
+		secrets = origSecrets
+		os.Setenv("BW_CLIENTID", origClientID)
+		os.Setenv("BW_CLIENTSECRET", origClientSecret)
+	})
+
+	os.Unsetenv("BW_CLIENTID")
+	os.Unsetenv("BW_CLIENTSECRET")
+	secrets = secretCache{}
+
+	_, err := buildApiKeyGrant()
+	qt.Assert(t, err, qt.IsNotNil)
+	qt.Assert(t, err.Error(), qt.Contains, "client_credentials requires BW_CLIENTID/BW_CLIENTSECRET env vars or clientid/clientsecret in the bitw config")
+}
+
+// TestBuildApiKeyGrant_PartialCredentials verifies that buildApiKeyGrant
+// errors when only one of the two credentials is available.
+func TestBuildApiKeyGrant_PartialCredentials(t *testing.T) {
+	origSecrets := secrets
+	origClientID := os.Getenv("BW_CLIENTID")
+	origClientSecret := os.Getenv("BW_CLIENTSECRET")
+	t.Cleanup(func() {
+		secrets = origSecrets
+		os.Setenv("BW_CLIENTID", origClientID)
+		os.Setenv("BW_CLIENTSECRET", origClientSecret)
+	})
+
+	// Only ID from env, no secret anywhere.
+	os.Setenv("BW_CLIENTID", "env-client-id")
+	os.Unsetenv("BW_CLIENTSECRET")
+	secrets = secretCache{}
+
+	_, err := buildApiKeyGrant()
+	qt.Assert(t, err, qt.IsNotNil)
+	qt.Assert(t, err.Error(), qt.Contains, "client_credentials requires")
+}
+
+// TestRefreshToken_ConfigOnlyClientCreds verifies that refreshToken takes
+// the client_credentials path when credentials come from config (no env).
+func TestRefreshToken_ConfigOnlyClientCreds(t *testing.T) {
+	origData := globalData
+	origSecrets := secrets
+	origIdtURL := idtURL
+	origClientID := os.Getenv("BW_CLIENTID")
+	origClientSecret := os.Getenv("BW_CLIENTSECRET")
+	t.Cleanup(func() {
+		globalData = origData
+		secrets = origSecrets
+		idtURL = origIdtURL
+		os.Setenv("BW_CLIENTID", origClientID)
+		os.Setenv("BW_CLIENTSECRET", origClientSecret)
+	})
+
+	var receivedGrantType, receivedClientID string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/connect/token":
+			r.ParseForm()
+			receivedGrantType = r.FormValue("grant_type")
+			receivedClientID = r.FormValue("client_id")
+			json.NewEncoder(w).Encode(tokLoginResponse{
+				AccessToken:  "refreshed-token",
+				RefreshToken: "new-refresh",
+				ExpiresIn:    3600,
+				TokenType:    "Bearer",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	idtURL = server.URL
+	globalData = dataFile{
+		RefreshToken: "old-refresh-token",
+	}
+	secrets = secretCache{
+		data:                &globalData,
+		_configClientID:     "config-client-id",
+		_configClientSecret: "config-client-secret",
+	}
+	os.Unsetenv("BW_CLIENTID")
+	os.Unsetenv("BW_CLIENTSECRET")
+
+	err := refreshToken(context.Background())
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, receivedGrantType, qt.Equals, "refresh_token")
+	qt.Assert(t, receivedClientID, qt.Equals, "config-client-id")
+	qt.Assert(t, globalData.AccessToken, qt.Equals, "refreshed-token")
 }
