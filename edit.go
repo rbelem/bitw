@@ -15,6 +15,7 @@ import (
 // Usage:
 //
 //	bitw edit <cipher-name> [--notes NOTES] [--password-stdin] [--field NAME=VALUE]...
+//	  [--ssh-private-key-stdin] [--ssh-public-key PUB]
 //
 // At least one modifier flag is required. The cipher's per-item key (if any)
 // is preserved: fields are re-encrypted with the same item key, so the
@@ -23,6 +24,8 @@ import (
 // --password-stdin is only valid for login ciphers (type 1).
 // --notes is valid for any cipher type.
 // --field updates or creates custom fields by name (repeatable).
+// --ssh-private-key-stdin and --ssh-public-key are only valid for ssh-key
+// ciphers (type 5) and must be used together.
 //
 // The PUT endpoint /ciphers/{id} accepts the bare cipher (no wrapper),
 // unlike the legacy POST /ciphers/create which wraps in {"cipher": ...}.
@@ -31,10 +34,14 @@ func cmdEdit(ctx context.Context, args []string) error {
 	var notes string
 	var stdinPassword bool
 	var fields stringSliceFlag
+	var stdinSSHPrivKey bool
+	var sshPubKey string
 	var hasNotes bool
 	fs.StringVar(&notes, "notes", "", "new notes for the cipher")
 	fs.BoolVar(&stdinPassword, "password-stdin", false, "read new login password from stdin")
 	fs.Var(&fields, "field", "custom field NAME=VALUE (repeatable; updates or creates)")
+	fs.BoolVar(&stdinSSHPrivKey, "ssh-private-key-stdin", false, "read new SSH private key from stdin (type 5 only)")
+	fs.StringVar(&sshPubKey, "ssh-public-key", "", "new SSH public key (type 5 only)")
 	// Track whether --notes was explicitly set (empty string is a valid value).
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "notes" {
@@ -51,13 +58,21 @@ func cmdEdit(ctx context.Context, args []string) error {
 		}
 	})
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: bitw edit <cipher-name> [--notes NOTES] [--password-stdin] [--field NAME=VALUE]...")
+		return fmt.Errorf("usage: bitw edit <cipher-name> [--notes NOTES] [--password-stdin] [--field NAME=VALUE]... [--ssh-private-key-stdin] [--ssh-public-key PUB]")
 	}
 	cipherName := fs.Arg(0)
 
+	hasSSHPriv := stdinSSHPrivKey
+	hasSSHPub := sshPubKey != ""
+
 	// At least one modifier flag required.
-	if !hasNotes && !stdinPassword && len(fields) == 0 {
-		return fmt.Errorf("at least one of --notes, --password-stdin, or --field is required")
+	if !hasNotes && !stdinPassword && len(fields) == 0 && !hasSSHPriv && !hasSSHPub {
+		return fmt.Errorf("at least one of --notes, --password-stdin, --field, --ssh-private-key-stdin, or --ssh-public-key is required")
+	}
+
+	// SSH key flags must be used together.
+	if hasSSHPriv != hasSSHPub {
+		return fmt.Errorf("--ssh-private-key-stdin and --ssh-public-key must be used together")
 	}
 
 	// Parse --field NAME=VALUE pairs.
@@ -88,6 +103,9 @@ func cmdEdit(ctx context.Context, args []string) error {
 	if stdinPassword && cipher.Type != CipherLogin {
 		return fmt.Errorf("--password-stdin is only valid for login ciphers (type 1); cipher %q is type %d", cipherName, cipher.Type)
 	}
+	if (hasSSHPriv || hasSSHPub) && cipher.Type != CipherSshKey {
+		return fmt.Errorf("cannot set ssh key on cipher type %d", cipher.Type)
+	}
 
 	// Read new password from stdin if requested (before any encryption).
 	var newPassword []byte
@@ -102,10 +120,23 @@ func cmdEdit(ctx context.Context, args []string) error {
 		}
 	}
 
+	// Read new SSH private key from stdin if requested.
+	var newSSHPrivKey []byte
+	if hasSSHPriv {
+		newSSHPrivKey, err = stdinReadAll()
+		if err != nil {
+			return fmt.Errorf("could not read SSH private key from stdin: %w", err)
+		}
+		newSSHPrivKey = bytesTrimNewline(newSSHPrivKey)
+		if len(newSSHPrivKey) == 0 {
+			return fmt.Errorf("empty SSH private key; aborting")
+		}
+	}
+
 	// Build the PUT body. We re-encrypt fields using encryptFieldWith, which
 	// preserves the cipher's item key (if any) or falls back to the base key.
 	// The cipher.Key field is left unchanged.
-	putBody := buildEditBody(cipher, hasNotes, notes, newPassword, parsedFields)
+	putBody := buildEditBody(cipher, hasNotes, notes, newPassword, parsedFields, newSSHPrivKey, []byte(sshPubKey))
 
 	// Ensure token for the PUT call.
 	if err := ensureToken(ctx); err != nil {
@@ -131,7 +162,7 @@ func cmdEdit(ctx context.Context, args []string) error {
 // modified fields using the cipher's item key (if present) or the base key,
 // preserving the existing cipher.Key. Unmodified fields are re-encrypted
 // as-is to maintain the wire contract (all fields must be present).
-func buildEditBody(cipher *Cipher, hasNotes bool, notes string, newPassword []byte, newFields []fieldPair) map[string]interface{} {
+func buildEditBody(cipher *Cipher, hasNotes bool, notes string, newPassword []byte, newFields []fieldPair, newSSHPrivKey, newSSHPubKey []byte) map[string]interface{} {
 	body := map[string]interface{}{
 		"type": cipher.Type,
 		"name": cipher.Name, // already encrypted; pass through
@@ -196,10 +227,20 @@ func buildEditBody(cipher *Cipher, hasNotes bool, notes string, newPassword []by
 
 	case CipherSshKey:
 		if cipher.SshKey != nil {
-			body["sshKey"] = map[string]interface{}{
-				"privateKey": cipher.SshKey.PrivateKey,
-				"publicKey":  cipher.SshKey.PublicKey,
+			sshKeyMap := map[string]interface{}{}
+			if len(newSSHPrivKey) > 0 {
+				encPriv, _ := secrets.encryptFieldWith(cipher, newSSHPrivKey)
+				sshKeyMap["privateKey"] = encPriv
+			} else if !cipher.SshKey.PrivateKey.IsZero() {
+				sshKeyMap["privateKey"] = cipher.SshKey.PrivateKey
 			}
+			if len(newSSHPubKey) > 0 {
+				encPub, _ := secrets.encryptFieldWith(cipher, newSSHPubKey)
+				sshKeyMap["publicKey"] = encPub
+			} else if !cipher.SshKey.PublicKey.IsZero() {
+				sshKeyMap["publicKey"] = cipher.SshKey.PublicKey
+			}
+			body["sshKey"] = sshKeyMap
 		}
 	}
 

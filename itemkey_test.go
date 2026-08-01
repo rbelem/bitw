@@ -425,7 +425,7 @@ func TestCmdEdit_NoModifierFlags(t *testing.T) {
 	setupCacheTest(t)
 
 	err := cmdEdit(context.Background(), []string{"some-cipher"})
-	qt.Assert(t, err, qt.ErrorMatches, "at least one of --notes, --password-stdin, or --field is required")
+	qt.Assert(t, err, qt.ErrorMatches, "at least one of --notes, --password-stdin, --field, --ssh-private-key-stdin, or --ssh-public-key is required")
 }
 
 // TestCmdEdit_PreservesItemKey verifies that cmdEdit preserves the cipher's
@@ -589,4 +589,155 @@ func TestCmdCreate_Type5_RequiresSSHKeys(t *testing.T) {
 	t.Cleanup(func() { stdinReadAll = oldStdin })
 	err = cmdCreate(context.Background(), []string{"--type", "5", "--ssh-private-key-stdin", "test-ssh"})
 	qt.Assert(t, err, qt.ErrorMatches, "--ssh-public-key is required for type 5.*")
+}
+
+// TestCmdEdit_SshKeyRotation verifies that cmdEdit rotates sshKey fields on
+// a type-5 cipher and re-encrypts them with the item key.
+func TestCmdEdit_SshKeyRotation(t *testing.T) {
+	setupCacheTest(t)
+
+	cipher := Cipher{
+		Type: CipherSshKey,
+		ID:   uuid.New(),
+		Name: encryptStr(t, "edit-test-ssh"),
+		SshKey: &SshKey{
+			PrivateKey: encryptStr(t, "old-priv"),
+			PublicKey:  encryptStr(t, "old-pub"),
+		},
+	}
+	globalData.Sync.Ciphers = []Cipher{cipher}
+
+	oldStdin := stdinReadAll
+	stdinReadAll = func() ([]byte, error) { return []byte("new-priv\n"), nil }
+	t.Cleanup(func() { stdinReadAll = oldStdin })
+
+	var putBody []byte
+	server := mockEditServer(t, &putBody)
+	defer server.Close()
+
+	err := cmdEdit(context.Background(), []string{"--ssh-private-key-stdin", "--ssh-public-key", "new-pub", "edit-test-ssh"})
+	qt.Assert(t, err, qt.IsNil)
+
+	// Verify the PUT body contains the re-encrypted sshKey fields.
+	var parsed map[string]interface{}
+	qt.Assert(t, json.Unmarshal(putBody, &parsed), qt.IsNil)
+	sshKeyMap, ok := parsed["sshKey"].(map[string]interface{})
+	qt.Assert(t, ok, qt.IsTrue)
+	privStr, ok := sshKeyMap["privateKey"].(string)
+	qt.Assert(t, ok, qt.IsTrue)
+	pubStr, ok := sshKeyMap["publicKey"].(string)
+	qt.Assert(t, ok, qt.IsTrue)
+
+	// Decrypt and verify.
+	var cs CipherString
+	qt.Assert(t, cs.UnmarshalText([]byte(privStr)), qt.IsNil)
+	decPriv, err := secrets.decryptFieldStr(&cipher, cs)
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, decPriv, qt.Equals, "new-priv")
+
+	qt.Assert(t, cs.UnmarshalText([]byte(pubStr)), qt.IsNil)
+	decPub, err := secrets.decryptFieldStr(&cipher, cs)
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, decPub, qt.Equals, "new-pub")
+}
+
+// TestCmdEdit_SshKeyFlagsTogether verifies that --ssh-private-key-stdin and
+// --ssh-public-key must be used together.
+func TestCmdEdit_SshKeyFlagsTogether(t *testing.T) {
+	setupCacheTest(t)
+
+	cipher := Cipher{
+		Type: CipherSshKey,
+		ID:   uuid.New(),
+		Name: encryptStr(t, "edit-test-ssh"),
+		SshKey: &SshKey{
+			PrivateKey: encryptStr(t, "old-priv"),
+			PublicKey:  encryptStr(t, "old-pub"),
+		},
+	}
+	globalData.Sync.Ciphers = []Cipher{cipher}
+
+	// Only --ssh-private-key-stdin.
+	oldStdin := stdinReadAll
+	stdinReadAll = func() ([]byte, error) { return []byte("new-priv\n"), nil }
+	t.Cleanup(func() { stdinReadAll = oldStdin })
+
+	err := cmdEdit(context.Background(), []string{"--ssh-private-key-stdin", "edit-test-ssh"})
+	qt.Assert(t, err, qt.ErrorMatches, "--ssh-private-key-stdin and --ssh-public-key must be used together")
+
+	// Only --ssh-public-key.
+	err = cmdEdit(context.Background(), []string{"--ssh-public-key", "new-pub", "edit-test-ssh"})
+	qt.Assert(t, err, qt.ErrorMatches, "--ssh-private-key-stdin and --ssh-public-key must be used together")
+}
+
+// TestCmdEdit_SshKeyOnNonType5 verifies that SSH key flags are rejected for
+// non-type-5 ciphers.
+func TestCmdEdit_SshKeyOnNonType5(t *testing.T) {
+	setupCacheTest(t)
+
+	notes := encryptStr(t, "some notes")
+	cipher := Cipher{
+		Type:  CipherNote,
+		ID:    uuid.New(),
+		Name:  encryptStr(t, "edit-test-note"),
+		Notes: &notes,
+	}
+	globalData.Sync.Ciphers = []Cipher{cipher}
+
+	oldStdin := stdinReadAll
+	stdinReadAll = func() ([]byte, error) { return []byte("new-priv\n"), nil }
+	t.Cleanup(func() { stdinReadAll = oldStdin })
+
+	err := cmdEdit(context.Background(), []string{"--ssh-private-key-stdin", "--ssh-public-key", "new-pub", "edit-test-note"})
+	qt.Assert(t, err, qt.ErrorMatches, "cannot set ssh key on cipher type 2")
+}
+
+// TestCmdEdit_SshKeyPreservesItemKey verifies that SSH key rotation preserves
+// the cipher's item key.
+func TestCmdEdit_SshKeyPreservesItemKey(t *testing.T) {
+	setupCacheTest(t)
+
+	// Generate a random 64-byte item key.
+	itemKey := make([]byte, 64)
+	_, err := rand.Read(itemKey)
+	qt.Assert(t, err, qt.IsNil)
+
+	// Encrypt the item key with the base key.
+	encItemKey, err := encryptWith(itemKey, AesCbc256_HmacSha256_B64, secrets.key, secrets.macKey)
+	qt.Assert(t, err, qt.IsNil)
+
+	// Encrypt fields with the item key.
+	encName, _ := encryptWith([]byte("item-key-ssh"), AesCbc256_HmacSha256_B64, itemKey[:32], itemKey[32:64])
+	encPriv, _ := encryptWith([]byte("old-priv"), AesCbc256_HmacSha256_B64, itemKey[:32], itemKey[32:64])
+	encPub, _ := encryptWith([]byte("old-pub"), AesCbc256_HmacSha256_B64, itemKey[:32], itemKey[32:64])
+
+	cipher := Cipher{
+		Type: CipherSshKey,
+		ID:   uuid.New(),
+		Key:  encItemKey,
+		Name: encName,
+		SshKey: &SshKey{
+			PrivateKey: encPriv,
+			PublicKey:  encPub,
+		},
+	}
+	globalData.Sync.Ciphers = []Cipher{cipher}
+
+	oldStdin := stdinReadAll
+	stdinReadAll = func() ([]byte, error) { return []byte("new-priv\n"), nil }
+	t.Cleanup(func() { stdinReadAll = oldStdin })
+
+	var putBody []byte
+	server := mockEditServer(t, &putBody)
+	defer server.Close()
+
+	err = cmdEdit(context.Background(), []string{"--ssh-private-key-stdin", "--ssh-public-key", "new-pub", "item-key-ssh"})
+	qt.Assert(t, err, qt.IsNil)
+
+	// Verify the PUT body contains the cipher.Key (item key).
+	var parsed map[string]interface{}
+	qt.Assert(t, json.Unmarshal(putBody, &parsed), qt.IsNil)
+	keyStr, ok := parsed["key"].(string)
+	qt.Assert(t, ok, qt.IsTrue)
+	qt.Assert(t, keyStr, qt.Equals, encItemKey.String())
 }
