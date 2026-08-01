@@ -605,53 +605,31 @@ func TestLogin_BothEnvAndLibsecret_EnvWins(t *testing.T) {
 	qt.Assert(t, receivedClientSecret, qt.Equals, "env-client-secret")
 }
 
-// TestLogin_NoEnv_LibsecretFallback verifies that when BW_CLIENTID is NOT set
-// in env but secretCache has values (simulating libsecret), the libsecret
-// values are used via loginApiKey (called directly).
-func TestLogin_NoEnv_LibsecretFallback(t *testing.T) {
-	var receivedClientId, receivedClientSecret string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/connect/token":
-			r.ParseForm()
-			receivedClientId = r.FormValue("client_id")
-			receivedClientSecret = r.FormValue("client_secret")
-			json.NewEncoder(w).Encode(tokLoginResponse{
-				AccessToken:  "test-access-token",
-				RefreshToken: "test-refresh-token",
-				ExpiresIn:    3600,
-				TokenType:    "Bearer",
-			})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
+// TestLogin_NoEnv_NoClientCreds verifies that when BW_CLIENTID is NOT set
+// in env, loginApiKey returns an error (no libsecret fallback for client creds).
+func TestLogin_NoEnv_NoClientCreds(t *testing.T) {
+	origClientID := os.Getenv("BW_CLIENTID")
+	origClientSecret := os.Getenv("BW_CLIENTSECRET")
+	t.Cleanup(func() {
+		os.Setenv("BW_CLIENTID", origClientID)
+		os.Setenv("BW_CLIENTSECRET", origClientSecret)
+	})
 
-	oldIdtURL := idtURL
-	idtURL = server.URL
-	defer func() { idtURL = oldIdtURL }()
-
-	resetLoginState(t)
-	// No env vars set.
 	os.Unsetenv("BW_CLIENTID")
 	os.Unsetenv("BW_CLIENTSECRET")
 
-	// Set secretCache values (simulating libsecret)
+	// Set secretCache values (simulating libsecret) — but these should NOT
+	// be used for client credentials anymore.
 	secrets = secretCache{
 		data:          &globalData,
 		_clientId:     []byte("libsecret-client-id"),
 		_clientSecret: []byte("libsecret-client-secret"),
 	}
 
-	// Call loginApiKey directly since without env vars, login() dispatches
-	// to loginInteractive. This test verifies buildApiKeyGrant's libsecret fallback.
 	ctx := context.Background()
 	err := loginApiKey(ctx)
-	qt.Assert(t, err, qt.IsNil)
-
-	qt.Assert(t, receivedClientId, qt.Equals, "libsecret-client-id")
-	qt.Assert(t, receivedClientSecret, qt.Equals, "libsecret-client-secret")
+	qt.Assert(t, err, qt.IsNotNil)
+	qt.Assert(t, err.Error(), qt.Contains, "client_credentials requires BW_CLIENTID and BW_CLIENTSECRET env vars")
 }
 
 // TestLogin_HeadersMatchUpstream verifies that all 5 central headers on every

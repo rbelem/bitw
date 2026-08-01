@@ -178,9 +178,13 @@ func TestRefreshToken(t *testing.T) {
 	// Save and restore global state.
 	origData := globalData
 	origSecrets := secrets
+	origClientID := os.Getenv("BW_CLIENTID")
+	origClientSecret := os.Getenv("BW_CLIENTSECRET")
 	t.Cleanup(func() {
 		globalData = origData
 		secrets = origSecrets
+		os.Setenv("BW_CLIENTID", origClientID)
+		os.Setenv("BW_CLIENTSECRET", origClientSecret)
 	})
 
 	globalData = dataFile{
@@ -191,6 +195,8 @@ func TestRefreshToken(t *testing.T) {
 		_clientId:     []byte("test-client-id"),
 		_clientSecret: []byte("test-client-secret"),
 	}
+	os.Setenv("BW_CLIENTID", "test-client-id")
+	os.Setenv("BW_CLIENTSECRET", "test-client-secret")
 
 	err := refreshToken(context.Background())
 	qt.Assert(t, err, qt.IsNil)

@@ -329,31 +329,14 @@ func storePasswordLibsecret(password []byte) {
 }
 
 func buildApiKeyGrant() (url.Values, error) {
-	// Env-first per ADR-0003 §Context. The Go binary never reads libsecret
-	// directly for THESE credentials (the API key); the bash init-hook
-	// consumes the libsecret mirror and populates the shell env. The
-	// crypto.go fallback chain (secrets.clientId() / secrets.clientSecret()
-	// below) is for *interactive prompts*, not libsecret — if env is
-	// empty and there's no TTY, `bitw` errors with "need a terminal to
-	// prompt for a password" for what is actually a missing API key.
-	// (Note: the master password itself is a separate libsecret lookup;
-	// see `crypto.go:124` for that path.)
-	// Without env-first priority, users with creds only in env get a
-	// silent fallthrough to password grant.
+	// Env-only per design: BW_CLIENTID/BW_CLIENTSECRET must be explicitly
+	// set by the user. No interactive prompts, no libsecret lookup for
+	// these credentials. If not set, the caller should fall back to
+	// password-grant login.
 	clientId := os.Getenv("BW_CLIENTID")
 	clientSecret := os.Getenv("BW_CLIENTSECRET")
 	if clientId == "" || clientSecret == "" {
-		var err error
-		clientIdBytes, err := secrets.clientId()
-		if err != nil {
-			return nil, err
-		}
-		clientSecretBytes, err := secrets.clientSecret()
-		if err != nil {
-			return nil, err
-		}
-		clientId = string(clientIdBytes[:])
-		clientSecret = string(clientSecretBytes[:])
+		return nil, fmt.Errorf("client_credentials requires BW_CLIENTID and BW_CLIENTSECRET env vars")
 	}
 	return urlValues(
 		"client_id", clientId,
@@ -476,6 +459,21 @@ func refreshToken(ctx context.Context) error {
 		return fmt.Errorf("no refresh token available; re-login required")
 	}
 
+	// If BW_CLIENTID/BW_CLIENTSECRET are set, use the refresh_token grant
+	// with client_credentials (the original path).
+	if os.Getenv("BW_CLIENTID") != "" && os.Getenv("BW_CLIENTSECRET") != "" {
+		return refreshTokenWithClientCreds(ctx)
+	}
+
+	// No client credentials in env → fall back to password-grant re-login.
+	// This uses the cached email + master password (from libsecret or
+	// PASSWORD env) and prompts for TOTP if the server requires 2FA.
+	return reloginPasswordGrant(ctx)
+}
+
+// refreshTokenWithClientCreds performs a refresh_token grant using
+// BW_CLIENTID/BW_CLIENTSECRET from env.
+func refreshTokenWithClientCreds(ctx context.Context) error {
 	clientId, err := secrets.clientId()
 	if err != nil {
 		return fmt.Errorf("could not obtain client id for refresh: %v", err)
@@ -503,6 +501,64 @@ func refreshToken(ctx context.Context) error {
 	globalData.RefreshToken = tokLogin.RefreshToken
 	globalData.TokenExpiry = time.Now().UTC().Add(time.Duration(tokLogin.ExpiresIn) * time.Second)
 	saveData = true
+	return nil
+}
+
+// reloginPasswordGrant performs a full password-grant login using cached
+// email and master password (from libsecret or PASSWORD env). Used as a
+// fallback when refresh_token grant is not possible (no BW_CLIENTID/
+// BW_CLIENTSECRET in env). Prompts for TOTP if the server requires 2FA.
+func reloginPasswordGrant(ctx context.Context) error {
+	email := secrets.email()
+	if email == "" {
+		return fmt.Errorf("no email available for password-grant re-login; " +
+			"set BW_CLIENTID + BW_CLIENTSECRET for non-interactive login")
+	}
+
+	// Get master password from libsecret or PASSWORD env (no interactive
+	// prompt — if not available, error out).
+	password, err := secrets.password()
+	if err != nil {
+		return fmt.Errorf("could not obtain master password for re-login: %v", err)
+	}
+
+	// Prelogin to get KDF params.
+	var preLogin preLoginResponse
+	if err := jsonPOST(ctx, idtURL+"/accounts/prelogin", &preLogin,
+		preLoginRequest{Email: email}); err != nil {
+		return fmt.Errorf("could not pre-login for re-login: %w", err)
+	}
+
+	// Build password grant.
+	values, err := buildPasswordGrant(email, preLogin, password)
+	if err != nil {
+		return fmt.Errorf("could not build password grant: %w", err)
+	}
+
+	var tok tokLoginResponse
+	err = jsonPOST(ctx, idtURL+"/connect/token", &tok, values)
+	// Handle 2FA if needed.
+	if errsc, ok := err.(*errStatusCode); ok && bytes.Contains(errsc.body, []byte("TwoFactor")) {
+		var tf twoFactorResponse
+		if err := json.Unmarshal(errsc.body, &tf); err != nil {
+			return err
+		}
+		provider, token, err := twoFactorPrompt(&tf)
+		if err != nil {
+			return fmt.Errorf("could not obtain two-factor auth token: %w", err)
+		}
+		values.Set("twoFactorProvider", strconv.Itoa(int(provider)))
+		values.Set("twoFactorToken", string(token))
+		values.Set("twoFactorRemember", "1")
+		tok = tokLoginResponse{}
+		if err := jsonPOST(ctx, idtURL+"/connect/token", &tok, values); err != nil {
+			return fmt.Errorf("could not login via two-factor: %w", err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("could not re-login: %w", err)
+	}
+
+	storeToken(tok)
 	return nil
 }
 

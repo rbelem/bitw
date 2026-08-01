@@ -109,40 +109,22 @@ func TestBuildApiKeyGrant_EnvVars(t *testing.T) {
 	qt.Assert(t, values.Get("grant_type"), qt.Equals, "client_credentials")
 }
 
-// TestBuildApiKeyGrant_PromptFallback verifies that buildApiKeyGrant falls back
-// to prompts when env vars are not set.
-func TestBuildApiKeyGrant_PromptFallback(t *testing.T) {
-	origSecrets := secrets
+// TestBuildApiKeyGrant_NoEnvVars verifies that buildApiKeyGrant returns an
+// error when BW_CLIENTID and BW_CLIENTSECRET are not set (no prompt).
+func TestBuildApiKeyGrant_NoEnvVars(t *testing.T) {
 	origClientID := os.Getenv("BW_CLIENTID")
 	origClientSecret := os.Getenv("BW_CLIENTSECRET")
 	t.Cleanup(func() {
-		secrets = origSecrets
 		os.Setenv("BW_CLIENTID", origClientID)
 		os.Setenv("BW_CLIENTSECRET", origClientSecret)
 	})
 
 	os.Unsetenv("BW_CLIENTID")
 	os.Unsetenv("BW_CLIENTSECRET")
-	secrets = secretCache{}
 
-	// Mock passwordPromptFunc to return credentials
-	oldPrompt := passwordPromptFunc
-	promptCount := 0
-	passwordPromptFunc = func(prompt string) ([]byte, error) {
-		promptCount++
-		if promptCount == 1 {
-			return []byte("prompted-client-id"), nil
-		}
-		return []byte("prompted-client-secret"), nil
-	}
-	t.Cleanup(func() { passwordPromptFunc = oldPrompt })
-
-	values, err := buildApiKeyGrant()
-	qt.Assert(t, err, qt.IsNil)
-	// The values should be the prompted credentials
-	qt.Assert(t, values.Get("client_id"), qt.Not(qt.Equals), "")
-	qt.Assert(t, values.Get("client_secret"), qt.Not(qt.Equals), "")
-	qt.Assert(t, values.Get("grant_type"), qt.Equals, "client_credentials")
+	_, err := buildApiKeyGrant()
+	qt.Assert(t, err, qt.IsNotNil)
+	qt.Assert(t, err.Error(), qt.Contains, "client_credentials requires BW_CLIENTID and BW_CLIENTSECRET env vars")
 }
 
 // TestRefreshToken_Success verifies that refreshToken succeeds when the server
@@ -151,10 +133,14 @@ func TestRefreshToken_Success(t *testing.T) {
 	origData := globalData
 	origSecrets := secrets
 	origIdtURL := idtURL
+	origClientID := os.Getenv("BW_CLIENTID")
+	origClientSecret := os.Getenv("BW_CLIENTSECRET")
 	t.Cleanup(func() {
 		globalData = origData
 		secrets = origSecrets
 		idtURL = origIdtURL
+		os.Setenv("BW_CLIENTID", origClientID)
+		os.Setenv("BW_CLIENTSECRET", origClientSecret)
 	})
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -181,6 +167,8 @@ func TestRefreshToken_Success(t *testing.T) {
 		_clientId:     []byte("test-client-id"),
 		_clientSecret: []byte("test-client-secret"),
 	}
+	os.Setenv("BW_CLIENTID", "test-client-id")
+	os.Setenv("BW_CLIENTSECRET", "test-client-secret")
 
 	err := refreshToken(context.Background())
 	qt.Assert(t, err, qt.IsNil)
@@ -194,10 +182,14 @@ func TestRefreshToken_ServerError(t *testing.T) {
 	origData := globalData
 	origSecrets := secrets
 	origIdtURL := idtURL
+	origClientID := os.Getenv("BW_CLIENTID")
+	origClientSecret := os.Getenv("BW_CLIENTSECRET")
 	t.Cleanup(func() {
 		globalData = origData
 		secrets = origSecrets
 		idtURL = origIdtURL
+		os.Setenv("BW_CLIENTID", origClientID)
+		os.Setenv("BW_CLIENTSECRET", origClientSecret)
 	})
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -214,6 +206,8 @@ func TestRefreshToken_ServerError(t *testing.T) {
 		_clientId:     []byte("test-client-id"),
 		_clientSecret: []byte("test-client-secret"),
 	}
+	os.Setenv("BW_CLIENTID", "test-client-id")
+	os.Setenv("BW_CLIENTSECRET", "test-client-secret")
 
 	err := refreshToken(context.Background())
 	qt.Assert(t, err, qt.IsNotNil)
@@ -360,10 +354,14 @@ func TestEnsureToken_RefreshTokenError(t *testing.T) {
 	origData := globalData
 	origSecrets := secrets
 	origIdtURL := idtURL
+	origClientID := os.Getenv("BW_CLIENTID")
+	origClientSecret := os.Getenv("BW_CLIENTSECRET")
 	t.Cleanup(func() {
 		globalData = origData
 		secrets = origSecrets
 		idtURL = origIdtURL
+		os.Setenv("BW_CLIENTID", origClientID)
+		os.Setenv("BW_CLIENTSECRET", origClientSecret)
 	})
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -382,6 +380,8 @@ func TestEnsureToken_RefreshTokenError(t *testing.T) {
 		_clientId:     []byte("test-client-id"),
 		_clientSecret: []byte("test-client-secret"),
 	}
+	os.Setenv("BW_CLIENTID", "test-client-id")
+	os.Setenv("BW_CLIENTSECRET", "test-client-secret")
 
 	err := ensureToken(context.Background())
 	qt.Assert(t, err, qt.IsNotNil)
@@ -416,4 +416,98 @@ func TestTwoFactorProvider_UnmarshalText_Valid(t *testing.T) {
 	err = p.UnmarshalText([]byte("1"))
 	qt.Assert(t, err, qt.IsNil)
 	qt.Assert(t, p, qt.Equals, Email)
+}
+
+// TestRefreshToken_FallbackToPasswordGrant verifies that refreshToken falls
+// back to password-grant re-login when BW_CLIENTID/BW_CLIENTSECRET are not
+// set in env.
+func TestRefreshToken_FallbackToPasswordGrant(t *testing.T) {
+	origData := globalData
+	origSecrets := secrets
+	origIdtURL := idtURL
+	origClientID := os.Getenv("BW_CLIENTID")
+	origClientSecret := os.Getenv("BW_CLIENTSECRET")
+	origEmail := os.Getenv("EMAIL")
+	origPassword := os.Getenv("PASSWORD")
+	t.Cleanup(func() {
+		globalData = origData
+		secrets = origSecrets
+		idtURL = origIdtURL
+		os.Setenv("BW_CLIENTID", origClientID)
+		os.Setenv("BW_CLIENTSECRET", origClientSecret)
+		os.Setenv("EMAIL", origEmail)
+		os.Setenv("PASSWORD", origPassword)
+	})
+
+	var preloginCalled, tokenCalled bool
+	var receivedGrantType string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/accounts/prelogin":
+			preloginCalled = true
+			json.NewEncoder(w).Encode(preLoginResponse{
+				KDF:           0,
+				KDFIterations: 100000,
+			})
+		case "/connect/token":
+			tokenCalled = true
+			r.ParseForm()
+			receivedGrantType = r.FormValue("grant_type")
+			json.NewEncoder(w).Encode(tokLoginResponse{
+				AccessToken:  "new-access-token",
+				RefreshToken: "new-refresh-token",
+				ExpiresIn:    3600,
+				TokenType:    "Bearer",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	idtURL = server.URL
+	globalData = dataFile{
+		RefreshToken: "old-refresh-token",
+	}
+	secrets = secretCache{data: &globalData}
+	os.Unsetenv("BW_CLIENTID")
+	os.Unsetenv("BW_CLIENTSECRET")
+	os.Setenv("EMAIL", "test@example.com")
+	os.Setenv("PASSWORD", "test-master-password")
+
+	err := refreshToken(context.Background())
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, preloginCalled, qt.IsTrue)
+	qt.Assert(t, tokenCalled, qt.IsTrue)
+	qt.Assert(t, receivedGrantType, qt.Equals, "password")
+	qt.Assert(t, globalData.AccessToken, qt.Equals, "new-access-token")
+}
+
+// TestRefreshToken_FallbackNoEmail verifies that refreshToken returns an error
+// when falling back to password-grant but no email is available.
+func TestRefreshToken_FallbackNoEmail(t *testing.T) {
+	origData := globalData
+	origSecrets := secrets
+	origClientID := os.Getenv("BW_CLIENTID")
+	origClientSecret := os.Getenv("BW_CLIENTSECRET")
+	origEmail := os.Getenv("EMAIL")
+	t.Cleanup(func() {
+		globalData = origData
+		secrets = origSecrets
+		os.Setenv("BW_CLIENTID", origClientID)
+		os.Setenv("BW_CLIENTSECRET", origClientSecret)
+		os.Setenv("EMAIL", origEmail)
+	})
+
+	globalData = dataFile{
+		RefreshToken: "old-refresh-token",
+	}
+	secrets = secretCache{data: &globalData}
+	os.Unsetenv("BW_CLIENTID")
+	os.Unsetenv("BW_CLIENTSECRET")
+	os.Unsetenv("EMAIL")
+
+	err := refreshToken(context.Background())
+	qt.Assert(t, err, qt.IsNotNil)
+	qt.Assert(t, err.Error(), qt.Contains, "no email available")
 }

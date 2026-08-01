@@ -140,12 +140,7 @@ func (c *secretCache) clientId() ([]byte, error) {
 		c._clientId = []byte(s)
 		return c._clientId, nil
 	}
-	clientId, err := passwordPrompt("client_id")
-	if err != nil {
-		return nil, err
-	}
-	c._clientId = []byte(clientId)
-	return c._clientId, nil
+	return nil, nil
 }
 
 func (c *secretCache) clientSecret() ([]byte, error) {
@@ -156,12 +151,7 @@ func (c *secretCache) clientSecret() ([]byte, error) {
 		c._clientSecret = []byte(s)
 		return c._clientSecret, nil
 	}
-	clientSecret, err := passwordPrompt("client_secret")
-	if err != nil {
-		return nil, err
-	}
-	c._clientSecret = []byte(clientSecret)
-	return c._clientSecret, nil
+	return nil, nil
 }
 
 func (c *secretCache) initKeys() error {

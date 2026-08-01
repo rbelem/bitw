@@ -98,9 +98,9 @@ func TestPassword_PromptError(t *testing.T) {
 	qt.Assert(t, err, qt.IsNotNil)
 }
 
-// TestClientId_PromptFallback verifies that clientId() falls back to
-// passwordPrompt when env is empty (crypto.go:143-148).
-func TestClientId_PromptFallback(t *testing.T) {
+// TestClientId_NoEnvNoCache verifies that clientId() returns nil, nil when
+// neither env var nor cached value is set (no prompt).
+func TestClientId_NoEnvNoCache(t *testing.T) {
 	origSecrets := secrets
 	origClientID := os.Getenv("BW_CLIENTID")
 	t.Cleanup(func() {
@@ -110,23 +110,15 @@ func TestClientId_PromptFallback(t *testing.T) {
 
 	os.Unsetenv("BW_CLIENTID")
 	secrets = secretCache{}
-
-	// Mock passwordPromptFunc to return a client ID
-	oldPrompt := passwordPromptFunc
-	passwordPromptFunc = func(prompt string) ([]byte, error) {
-		return []byte("prompted-client-id"), nil
-	}
-	t.Cleanup(func() { passwordPromptFunc = oldPrompt })
 
 	id, err := secrets.clientId()
 	qt.Assert(t, err, qt.IsNil)
-	// The client ID must be the mocked prompt value, not a real one.
-	qt.Assert(t, string(id), qt.Equals, "prompted-client-id")
+	qt.Assert(t, id, qt.IsNil)
 }
 
-// TestClientId_PromptError verifies that clientId() propagates errors from
-// passwordPrompt (crypto.go:144-146).
-func TestClientId_PromptError(t *testing.T) {
+// TestClientId_EnvVar verifies that clientId() returns the env var value
+// when set.
+func TestClientId_EnvVar(t *testing.T) {
 	origSecrets := secrets
 	origClientID := os.Getenv("BW_CLIENTID")
 	t.Cleanup(func() {
@@ -134,24 +126,17 @@ func TestClientId_PromptError(t *testing.T) {
 		os.Setenv("BW_CLIENTID", origClientID)
 	})
 
-	os.Unsetenv("BW_CLIENTID")
+	os.Setenv("BW_CLIENTID", "env-client-id")
 	secrets = secretCache{}
 
-	// Mock passwordPromptFunc to return an error
-	oldPrompt := passwordPromptFunc
-	passwordPromptFunc = func(prompt string) ([]byte, error) {
-		return nil, fmt.Errorf("prompt error")
-	}
-	t.Cleanup(func() { passwordPromptFunc = oldPrompt })
-
-	_, err := secrets.clientId()
-	// The error must be propagated from passwordPrompt.
-	qt.Assert(t, err, qt.IsNotNil)
+	id, err := secrets.clientId()
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, string(id), qt.Equals, "env-client-id")
 }
 
-// TestClientSecret_PromptFallback verifies that clientSecret() falls back to
-// passwordPrompt when env is empty (crypto.go:159-164).
-func TestClientSecret_PromptFallback(t *testing.T) {
+// TestClientSecret_NoEnvNoCache verifies that clientSecret() returns nil, nil
+// when neither env var nor cached value is set (no prompt).
+func TestClientSecret_NoEnvNoCache(t *testing.T) {
 	origSecrets := secrets
 	origClientSecret := os.Getenv("BW_CLIENTSECRET")
 	t.Cleanup(func() {
@@ -161,23 +146,15 @@ func TestClientSecret_PromptFallback(t *testing.T) {
 
 	os.Unsetenv("BW_CLIENTSECRET")
 	secrets = secretCache{}
-
-	// Mock passwordPromptFunc to return a client secret
-	oldPrompt := passwordPromptFunc
-	passwordPromptFunc = func(prompt string) ([]byte, error) {
-		return []byte("prompted-client-secret"), nil
-	}
-	t.Cleanup(func() { passwordPromptFunc = oldPrompt })
 
 	secret, err := secrets.clientSecret()
 	qt.Assert(t, err, qt.IsNil)
-	// The secret must be the mocked prompt value, not a real one.
-	qt.Assert(t, string(secret), qt.Equals, "prompted-client-secret")
+	qt.Assert(t, secret, qt.IsNil)
 }
 
-// TestClientSecret_PromptError verifies that clientSecret() propagates errors
-// from passwordPrompt (crypto.go:160-162).
-func TestClientSecret_PromptError(t *testing.T) {
+// TestClientSecret_EnvVar verifies that clientSecret() returns the env var
+// value when set.
+func TestClientSecret_EnvVar(t *testing.T) {
 	origSecrets := secrets
 	origClientSecret := os.Getenv("BW_CLIENTSECRET")
 	t.Cleanup(func() {
@@ -185,19 +162,12 @@ func TestClientSecret_PromptError(t *testing.T) {
 		os.Setenv("BW_CLIENTSECRET", origClientSecret)
 	})
 
-	os.Unsetenv("BW_CLIENTSECRET")
+	os.Setenv("BW_CLIENTSECRET", "env-client-secret")
 	secrets = secretCache{}
 
-	// Mock passwordPromptFunc to return an error
-	oldPrompt := passwordPromptFunc
-	passwordPromptFunc = func(prompt string) ([]byte, error) {
-		return nil, fmt.Errorf("prompt error")
-	}
-	t.Cleanup(func() { passwordPromptFunc = oldPrompt })
-
-	_, err := secrets.clientSecret()
-	// The error must be propagated from passwordPrompt.
-	qt.Assert(t, err, qt.IsNotNil)
+	secret, err := secrets.clientSecret()
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, string(secret), qt.Equals, "env-client-secret")
 }
 
 // TestInitKeys_PasswordError verifies that initKeys() propagates errors from

@@ -24,10 +24,14 @@ func TestEnsureToken_RefreshToken(t *testing.T) {
 	origData := globalData
 	origSecrets := secrets
 	origIdtURL := idtURL
+	origClientID := os.Getenv("BW_CLIENTID")
+	origClientSecret := os.Getenv("BW_CLIENTSECRET")
 	t.Cleanup(func() {
 		globalData = origData
 		secrets = origSecrets
 		idtURL = origIdtURL
+		os.Setenv("BW_CLIENTID", origClientID)
+		os.Setenv("BW_CLIENTSECRET", origClientSecret)
 	})
 
 	var tokenCalled bool
@@ -61,6 +65,8 @@ func TestEnsureToken_RefreshToken(t *testing.T) {
 		_clientId:     []byte("test-client-id"),
 		_clientSecret: []byte("test-client-secret"),
 	}
+	os.Setenv("BW_CLIENTID", "test-client-id")
+	os.Setenv("BW_CLIENTSECRET", "test-client-secret")
 
 	err := ensureToken(context.Background())
 	qt.Assert(t, err, qt.IsNil)
