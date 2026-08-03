@@ -42,6 +42,7 @@ Commands:
 	list    list stored ciphers (name, username, type) or their names only
 	cache   decrypt ciphers into a shell-sourceable env file
 	completions  print shell completion scripts (bash, zsh, fish)
+	sm      list secrets or get a secret value (Secrets Manager)
 	create  create a new cipher in the personal vault
 	edit    modify an existing cipher (notes, password, fields)
 	status  print current runtime state (token, KDF, last sync) — diagnostic
@@ -384,6 +385,10 @@ func dispatch(ctx context.Context, args []string) error {
 		}
 	case "status":
 		if err := cmdStatus(ctx, args[1:]); err != nil {
+			return err
+		}
+	case "sm":
+		if err := cmdSM(ctx, args[1:]); err != nil {
 			return err
 		}
 	default:

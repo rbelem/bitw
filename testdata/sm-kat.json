@@ -1,0 +1,16 @@
+{
+  "_provenance": "Real Bitwarden fixture from sdk-internal client_secrets.rs. All three plaintext fields (key/value/note) decrypt to 'TEST'. This limits field-swap detection in the KAT test, but the wire-level tests (TestSM_ListDecoding, TestSM_GetByID, TestSM_GetByKey, TestSM_GetFuzzy) already pin field mapping by exercising each field independently through the full decrypt path.",
+  "access_token": "0.ec2c1d46-6a4b-4751-a310-af9601317f2d.C2IgxjjLF7qSshsbwe8JGcbM075YXw:X8vbvA0bduihIDe/qrzIQQ==",
+  "expected_derived_key": "H9/oIRLtL9nGCQOVDjSMoEbJsjWXSOCb3qeyDt6ckzS3FhyboEDWyTP/CQfbIszNmAVg2ExFganG1FVFGXO/Jg==",
+  "encrypted_payload": "2.E9fE8+M/VWMfhhim1KlCbQ==|eLsHR484S/tJbIkM6spnG/HP65tj9A6Tba7kAAvUp+rYuQmGLixiOCfMsqt5OvBctDfvvr/AesBu7cZimPLyOEhqEAjn52jF0eaI38XZfeOG2VJl0LOf60Wkfh3ryAMvfvLj3G4ZCNYU8sNgoC2+IQ==|lNApuCQ4Pyakfo/wwuuajWNaEX/2MW8/3rjXB/V7n+k=",
+  "secret_id": "15744a66-341a-4c62-af50-af960166b6bc",
+  "org_id": "f4e44a7f-1190-432a-9d4a-af96013127cb",
+  "secret_key": "2.pMS6/icTQABtulw52pq2lg==|XXbxKxDTh+mWiN1HjH2N1w==|Q6PkuT+KX/axrgN9ubD5Ajk2YNwxQkgs3WJM0S0wtG8=",
+  "secret_value": "2.Gl34n9JYABC7V21qHcBzHg==|c1Ds244pob7i+8+MXe4++w==|Shimz/qKMYZmzSFWdeBzFb9dFz7oF6Uv9oqkws7rEe0=",
+  "secret_note": "2.Cn9ABJy7+WfR4uUHwdYepg==|+nbJyU/6hSknoa5dcEJEUg==|1DTp/ZbwGO3L3RN+VMsCHz8XDr8egn/M5iSitGGysPA=",
+  "expected_plaintexts": {
+    "key": "TEST",
+    "value": "TEST",
+    "note": "TEST"
+  }
+}

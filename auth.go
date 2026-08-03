@@ -32,6 +32,40 @@ type preLoginResponse struct {
 	KDFParallelism int
 }
 
+// claimFromAccessToken extracts a named claim from a Bitwarden JWT access
+// token. Returns "" if the token is not a JWT, is malformed, or lacks the
+// claim. Used for extracting email (crypto.go email fallback) and
+// organization (SM client) from JWTs.
+//
+// We do NOT verify the JWT signature — same approach as upstream
+// bitwarden/clients (decode-jwt-token-to-json.utility.ts). The token came
+// from our own /connect/token response (we trust it); the server already
+// validated it. We only read claims, which are non-security-critical
+// for our use (we'll re-validate by deriving a key and checking MAC).
+func claimFromAccessToken(token, claimName string) string {
+	parts := strings.SplitN(token, ".", 3)
+	if len(parts) != 3 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ""
+	}
+	var claims map[string]interface{}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return ""
+	}
+	val, ok := claims[claimName]
+	if !ok {
+		return ""
+	}
+	str, ok := val.(string)
+	if !ok {
+		return ""
+	}
+	return str
+}
+
 // emailFromAccessToken extracts the email claim from a Bitwarden JWT access
 // token. Returns "" if the token is not a JWT, is malformed, or lacks the
 // claim. Used as the 4th fallback in secrets.email() (crypto.go) so that
@@ -44,21 +78,7 @@ type preLoginResponse struct {
 // validated it. We only read the email claim, which is non-security-critical
 // for our use (we'll re-validate it by deriving a key and checking MAC).
 func emailFromAccessToken(token string) string {
-	parts := strings.SplitN(token, ".", 3)
-	if len(parts) != 3 {
-		return ""
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return ""
-	}
-	var claims struct {
-		Email string `json:"email"`
-	}
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return ""
-	}
-	return claims.Email
+	return claimFromAccessToken(token, "email")
 }
 
 // refreshKDF fetches /accounts/prelogin and writes the KDF block to

@@ -66,6 +66,20 @@ Note: the names file stores decrypted item names on disk (0600) so tab
 completion works without a password prompt. Item names are not treated as
 secrets; delete the file to disable name completion.
 
+#### Secrets Manager
+
+Read-only support for Bitwarden Secrets Manager (machine accounts). Set
+`SM_ACCESS_TOKEN` (the `0.<id>.<secret>:<key>` machine-account token; its
+encryption key is only held in process memory):
+
+	export SM_ACCESS_TOKEN=0.48c78342-....:B3h5D+YgLvFiQhWkIq6Bow==
+
+	bitw sm list                # decrypted secret keys + projects (TSV)
+	bitw sm get <key-or-id>     # print a secret's value
+
+The access token is exchanged per run (no persistence) and the org/secret
+keys are decrypted in memory with the existing AES-CBC-HMAC machinery.
+
 Refresh a shell-sourceable cache of all configured secrets (replaces the
 bash `secrets-refresh` loop):
 

@@ -68,6 +68,16 @@ func jsonGET(ctx context.Context, urlstr string, recv interface{}) error {
 	return httpDo(ctx, req, recv)
 }
 
+// jsonGETWithToken is jsonGET with an explicit bearer token, for clients
+// that do not use the vault token in globalData (e.g. Secrets Manager).
+func jsonGETWithToken(ctx context.Context, urlstr, token string, recv interface{}) error {
+	req, err := http.NewRequest("GET", urlstr, nil)
+	if err != nil {
+		return err
+	}
+	return httpDoWithToken(ctx, req, token, recv)
+}
+
 func jsonPUT(ctx context.Context, urlstr string, recv, send interface{}) error {
 	buf := new(bytes.Buffer)
 	if err := json.NewEncoder(buf).Encode(send); err != nil {
@@ -85,8 +95,15 @@ func httpDo(ctx context.Context, req *http.Request, recv interface{}) error {
 	// Read the token directly from globalData instead of ctx. This ensures
 	// that after ensureToken re-authenticates (via login/refreshToken), the
 	// fresh token is used — not a stale snapshot from main.go entry.
-	if globalData.AccessToken != "" {
-		req.Header.Set("Authorization", "Bearer "+globalData.AccessToken)
+	return httpDoWithToken(ctx, req, globalData.AccessToken, recv)
+}
+
+// httpDoWithToken is httpDo with an explicit bearer token ("" = no
+// Authorization header). Used by the Secrets Manager client, which carries
+// its own token rather than the vault token in globalData.
+func httpDoWithToken(ctx context.Context, req *http.Request, token string, recv interface{}) error {
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	// Bitwarden server rejects requests without client-identifying headers.
 	// See https://github.com/bitwarden/mobile/pull/1757 and
