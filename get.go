@@ -48,6 +48,8 @@ func (s *stringSliceFlag) Set(v string) error {
 	return nil
 }
 
+const getUsage = "usage: bitw get [--env-name NAME] [--json] [--field FIELD] <cipher-name> | bitw get totp <cipher-name>"
+
 func cmdGet(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("get", flag.ContinueOnError)
 	var envName string
@@ -59,16 +61,31 @@ func cmdGet(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if fs.NArg() != 1 && !(fs.NArg() == 2 && fs.Arg(0) == "totp") {
-		return fmt.Errorf("usage: bitw get [--env-name NAME] [--json] [--field FIELD] <cipher-name> | bitw get totp <cipher-name>")
-	}
-	if fs.NArg() == 1 && fs.Arg(0) == "totp" {
-		return fmt.Errorf("usage: bitw get totp <cipher-name>")
-	}
-	totpMode := fs.NArg() == 2
-	cipherName := fs.Arg(0)
-	if totpMode {
+
+	totpMode := false
+	pickerMode := false
+	var cipherName string
+	switch {
+	case fs.NArg() == 0:
+		// `bitw get` with no cipher → interactive picker (needs a terminal).
+		if !isTerminalFunc(int(os.Stdin.Fd())) {
+			return fmt.Errorf(getUsage)
+		}
+		pickerMode = true
+	case fs.NArg() == 1 && fs.Arg(0) == "totp":
+		// `bitw get totp` bare → picker in TOTP mode.
+		if !isTerminalFunc(int(os.Stdin.Fd())) {
+			return fmt.Errorf("usage: bitw get totp <cipher-name>")
+		}
+		pickerMode = true
+		totpMode = true
+	case fs.NArg() == 1:
+		cipherName = fs.Arg(0)
+	case fs.NArg() == 2 && fs.Arg(0) == "totp":
+		totpMode = true
 		cipherName = fs.Arg(1)
+	default:
+		return fmt.Errorf(getUsage)
 	}
 
 	// Unlock vault.
@@ -79,19 +96,95 @@ func cmdGet(ctx context.Context, args []string) error {
 		return err
 	}
 
-	cipher, err := findCipherByName(cipherName)
-	if err != nil {
-		return err
+	var cipher *Cipher
+	if pickerMode {
+		picked, err := pickCipher(decryptCipherList(), "")
+		if err != nil {
+			return err
+		}
+		if picked == nil {
+			return nil // cancelled (Esc / Ctrl-C / EOF)
+		}
+		cipher = picked.cipher
+		cipherName = picked.name
+	} else {
+		c, err := findCipherByName(cipherName)
+		if err != nil {
+			// No exact match. Rank fuzzy candidates and decide whether the
+			// top match is confident enough to auto-select, ambiguous, or too
+			// weak — see autoSelectCandidate and fuzzyFallbackFloor.
+			items := decryptCipherList()
+			names := make([]string, len(items))
+			for i, it := range items {
+				names[i] = it.name
+			}
+			if auto := autoSelectCandidate(fuzzyRank(cipherName, names)); auto != nil {
+				fmt.Fprintf(os.Stderr, "warning: no exact match for %q, using %q\n", cipherName, auto.name)
+				c, err = findCipherByName(auto.name)
+				if err != nil {
+					return err
+				}
+			} else if isTerminalFunc(int(os.Stdin.Fd())) {
+				// Weak/ambiguous: let the user confirm via the picker, with
+				// their query pre-typed so they can fix a typo or pick the
+				// intended item. Cancel → exit 0 silently.
+				picked, err := pickCipher(items, cipherName)
+				if err != nil {
+					return err
+				}
+				if picked == nil {
+					return nil
+				}
+				c = picked.cipher
+				cipherName = picked.name
+			} else {
+				// Non-interactive and not confident: never auto-select.
+				return fmt.Errorf("cipher %q not found", cipherName)
+			}
+		}
+		cipher = c
 	}
 
+	return cmdGetCipher(cipher, cipherName, totpMode, jsonMode, envName, fields)
+}
+
+// fuzzyFallbackFloor is the minimum fuzzyScore at which a non-exact name match
+// is auto-selected without user confirmation. Calibrated against fuzzyScore's
+// units (verified by TestFuzzyFallback_Calibration):
+//   - "gith"→"GitHub Token" (4-char consecutive run)        = 32  → accept
+//   - "git" →"GitHub"        (3-char consecutive run)        = 24  → accept
+//   - "gt"  →"GitHub"        (gappy 2-char subsequence)      = 6   → reject
+//
+// A floor of 10 sits in the gap, accepting confident matches (≥16 for clean
+// 2-char+ prefixes, higher for longer) while forcing weak gappy matches and
+// single characters through the picker for confirmation.
+const fuzzyFallbackFloor = 10
+
+// autoSelectCandidate returns the fuzzy match that is safe to auto-select
+// without user confirmation, or nil if there is no match, the best is below
+// fuzzyFallbackFloor, or the top two are tied (ambiguous). ranked must be the
+// output of fuzzyRank (sorted by score descending, ties broken alphabetically).
+func autoSelectCandidate(ranked []rankedMatch) *rankedMatch {
+	if len(ranked) == 0 || ranked[0].score < fuzzyFallbackFloor {
+		return nil
+	}
+	if len(ranked) > 1 && ranked[1].score == ranked[0].score {
+		return nil // exact tie → ambiguous
+	}
+	best := ranked[0]
+	return &best
+}
+
+// cmdGetCipher emits a selected cipher per the mode flags. Shared by the
+// normal name-based path, the interactive picker, and the fuzzy fallback so
+// all three reach a single emit path.
+func cmdGetCipher(cipher *Cipher, name string, totpMode, jsonMode bool, envName string, fields stringSliceFlag) error {
 	if totpMode {
-		return emitTotp(cipher, cipherName)
+		return emitTotp(cipher, name)
 	}
-
 	if jsonMode {
 		return emitCipherJSON(cipher)
 	}
-
 	if len(fields) > 0 {
 		// Field mode: emit bare values, one per --field.
 		for _, f := range fields {
@@ -111,13 +204,28 @@ func cmdGet(ctx context.Context, args []string) error {
 	switch cipher.Type {
 	case CipherLogin:
 		return emitLoginExports(cipher, envName)
-	case CipherNote:
-		return emitNoteExport(cipher, envName)
-	case CipherSshKey:
+	case CipherNote, CipherSshKey:
 		return emitNoteExport(cipher, envName)
 	default:
-		return fmt.Errorf("cipher %q has unsupported type %d", cipherName, cipher.Type)
+		return fmt.Errorf("cipher %q has unsupported type %d", name, cipher.Type)
 	}
+}
+
+// decryptCipherList returns all ciphers whose name decrypts successfully,
+// warning on stderr about any that fail (mirrors the cipherIndex loop in
+// cache.go). Used both to populate the picker and to seed fuzzy fallback.
+func decryptCipherList() []pickerItem {
+	var items []pickerItem
+	for i := range globalData.Sync.Ciphers {
+		c := &globalData.Sync.Ciphers[i]
+		name, err := secrets.decryptFieldStr(c, c.Name)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not decrypt name of cipher %s: %v\n", c.ID, err)
+			continue
+		}
+		items = append(items, pickerItem{cipher: c, name: name, typ: c.Type})
+	}
+	return items
 }
 
 // emitLoginExports emits shell-eval export lines for a login cipher.

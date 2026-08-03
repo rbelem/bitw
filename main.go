@@ -39,7 +39,9 @@ Commands:
 	login   force a new login, even if not necessary
 	dump    list all the stored login secrets
 	get     retrieve a cipher's fields (shell-eval or bare output), or generate a TOTP code (get totp <name>)
+	list    list stored ciphers (name, username, type) or their names only
 	cache   decrypt ciphers into a shell-sourceable env file
+	completions  print shell completion scripts (bash, zsh, fish)
 	create  create a new cipher in the personal vault
 	edit    modify an existing cipher (notes, password, fields)
 	status  print current runtime state (token, KDF, last sync) — diagnostic
@@ -360,6 +362,14 @@ func dispatch(ctx context.Context, args []string) error {
 		if err := cmdGet(ctx, args[1:]); err != nil {
 			return err
 		}
+	case "list":
+		if err := cmdList(ctx, args[1:]); err != nil {
+			return err
+		}
+	case "completions":
+		if err := cmdCompletions(ctx, args[1:]); err != nil {
+			return err
+		}
 	case "cache":
 		if err := cmdCache(ctx, args[1:]); err != nil {
 			return err
@@ -412,6 +422,13 @@ func setupSignalContext() context.Context {
 		time.Sleep(200 * time.Millisecond)
 		if stdinOldState != nil { // if nil, stdin is not a terminal
 			_ = term.Restore(stdinFD, stdinOldState)
+		}
+		// The picker enters the alternate screen and hides the cursor;
+		// an external SIGINT bypasses its defer-restore, so leave the
+		// terminal clean. Only do this when stdout is a terminal — the
+		// escapes are no-ops there but would pollute piped output.
+		if isTerminalFunc(int(os.Stdout.Fd())) {
+			fmt.Print("\x1b[?1049l\x1b[?25h")
 		}
 		fmt.Println()
 		os.Exit(0)

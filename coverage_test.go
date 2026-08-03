@@ -148,7 +148,7 @@ func TestFormatAge(t *testing.T) {
 // TestRefreshToken verifies that refreshToken() correctly refreshes an expired
 // token using the refresh_token grant. This covers auth.go:477 (0% coverage).
 func TestRefreshToken(t *testing.T) {
-	t.Parallel()
+	// Not parallel: mutates the package-global globalData/secrets.
 
 	var tokenCalled bool
 	var receivedRefreshToken string
@@ -209,7 +209,8 @@ func TestRefreshToken(t *testing.T) {
 // TestRefreshToken_NoRefreshToken verifies that refreshToken() returns an error
 // when no refresh token is available.
 func TestRefreshToken_NoRefreshToken(t *testing.T) {
-	t.Parallel()
+	// Not parallel: mutates the package-global globalData (races with
+	// TestRefreshToken when both run under -race).
 
 	origData := globalData
 	t.Cleanup(func() { globalData = origData })

@@ -39,6 +39,33 @@ secret; accepts raw base32, otpauth:// and steam:// keys):
 
 	bitw get totp my-item
 
+Interactively pick a cipher with a fuzzy-finder (same flags apply to the
+selection), or let `get` fuzzy-match a partial name:
+
+	bitw get                 # interactive picker
+	bitw get totp            # picker, then TOTP code
+	bitw get gith            # fuzzy-matches "GitHub Token" (warns on stderr)
+
+Note: fuzzy fallback auto-selects only for confident matches (a clean
+prefix/substring-style match). Weak or ambiguous matches open the picker
+so you confirm before any secret is printed — piping `2>/dev/null` away
+the warning cannot leak another item's secret.
+
+List stored ciphers without exposing secrets:
+
+	bitw list                # name, username, type (TSV, sorted)
+	bitw list --names-only   # bare names, for scripts
+
+Shell tab completion for commands and cipher names (bash, zsh, fish). Run
+`bitw list` once first — it writes the decrypted cipher names to
+`$CONFIG_DIR/names` (0600), which the completion scripts read:
+
+	eval "$(bitw completions bash)"     # add to your .bashrc
+
+Note: the names file stores decrypted item names on disk (0600) so tab
+completion works without a password prompt. Item names are not treated as
+secrets; delete the file to disable name completion.
+
 Refresh a shell-sourceable cache of all configured secrets (replaces the
 bash `secrets-refresh` loop):
 
