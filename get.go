@@ -59,10 +59,17 @@ func cmdGet(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: bitw get [--env-name NAME] [--json] [--field FIELD] <cipher-name>")
+	if fs.NArg() != 1 && !(fs.NArg() == 2 && fs.Arg(0) == "totp") {
+		return fmt.Errorf("usage: bitw get [--env-name NAME] [--json] [--field FIELD] <cipher-name> | bitw get totp <cipher-name>")
 	}
+	if fs.NArg() == 1 && fs.Arg(0) == "totp" {
+		return fmt.Errorf("usage: bitw get totp <cipher-name>")
+	}
+	totpMode := fs.NArg() == 2
 	cipherName := fs.Arg(0)
+	if totpMode {
+		cipherName = fs.Arg(1)
+	}
 
 	// Unlock vault.
 	if _, err := secrets.password(); err != nil {
@@ -75,6 +82,10 @@ func cmdGet(ctx context.Context, args []string) error {
 	cipher, err := findCipherByName(cipherName)
 	if err != nil {
 		return err
+	}
+
+	if totpMode {
+		return emitTotp(cipher, cipherName)
 	}
 
 	if jsonMode {
@@ -300,7 +311,7 @@ func resolveField(cipher *Cipher, field string) (string, error) {
 		if cipher.Login == nil {
 			return "", nil
 		}
-		return cipher.Login.Totp, nil
+		return secrets.decryptFieldStr(cipher, cipher.Login.Totp)
 	case "uri":
 		if cipher.Login == nil {
 			return "", nil

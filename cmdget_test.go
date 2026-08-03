@@ -42,7 +42,7 @@ func TestCmdGet_FieldMode_AllFields(t *testing.T) {
 			Username: encryptStr(t, "testuser"),
 			Password: encryptStr(t, "testpass"),
 			URI:      encryptStr(t, "https://example.com"),
-			Totp:     "123456",
+			Totp:     encryptStr(t, "123456"),
 		},
 		Notes: &notes,
 	}
@@ -167,7 +167,7 @@ func TestCmdGet_FieldMode_EmptyValueSkipped(t *testing.T) {
 		Name: encryptStr(t, "Test Cipher"),
 		Login: &Login{
 			Password: encryptStr(t, ""), // Empty password
-			Totp:     "",                // Empty totp
+			Totp:     encryptStr(t, ""), // Empty totp
 		},
 	}
 	globalData = dataFile{

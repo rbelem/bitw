@@ -200,7 +200,7 @@ func buildEditBody(cipher *Cipher, hasNotes bool, notes string, newPassword []by
 			if !cipher.Login.URI.IsZero() {
 				loginBody["uri"] = cipher.Login.URI
 			}
-			if cipher.Login.Totp != "" {
+			if !cipher.Login.Totp.IsZero() {
 				loginBody["totp"] = cipher.Login.Totp
 			}
 			// Password: use new password if provided, else pass through.

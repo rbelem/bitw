@@ -195,7 +195,7 @@ func TestResolveField(t *testing.T) {
 			Username: encryptForTest(t, "testuser"),
 			Password: encryptForTest(t, "testpass"),
 			URI:      encryptForTest(t, "https://example.com"),
-			Totp:     "123456",
+			Totp:     encryptForTest(t, "123456"),
 		},
 		Notes: notesPtr(encryptForTest(t, "test notes")),
 		Fields: []Field{

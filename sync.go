@@ -273,7 +273,7 @@ type Login struct {
 	URI      CipherString
 	URIs     []URI
 	Username CipherString `json:",omitempty"`
-	Totp     string       `json:",omitempty"`
+	Totp     CipherString `json:",omitempty"`
 }
 
 type URI struct {

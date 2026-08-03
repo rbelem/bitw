@@ -34,6 +34,11 @@ Fetch individual values for shell scripts (shell-eval-safe output):
 	# field mode: extract a single field
 	password=$(bitw get my-item --field password)
 
+Generate the current TOTP code for an account (login items with a TOTP
+secret; accepts raw base32, otpauth:// and steam:// keys):
+
+	bitw get totp my-item
+
 Refresh a shell-sourceable cache of all configured secrets (replaces the
 bash `secrets-refresh` loop):
 

@@ -38,7 +38,7 @@ Commands:
 	sync    fetch the latest data from the server
 	login   force a new login, even if not necessary
 	dump    list all the stored login secrets
-	get     retrieve a cipher's fields (shell-eval or bare output)
+	get     retrieve a cipher's fields (shell-eval or bare output), or generate a TOTP code (get totp <name>)
 	cache   decrypt ciphers into a shell-sourceable env file
 	create  create a new cipher in the personal vault
 	edit    modify an existing cipher (notes, password, fields)
