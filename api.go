@@ -80,6 +80,21 @@ func jsonGETWithToken(ctx context.Context, urlstr, token string, recv interface{
 	return httpDoWithToken(ctx, req, token, recv)
 }
 
+// jsonPOSTWithToken is jsonPOST with an explicit bearer token, for clients
+// that do not use the vault token in globalData (e.g. Secrets Manager).
+func jsonPOSTWithToken(ctx context.Context, urlstr, token string, recv, send interface{}) error {
+	buf := new(bytes.Buffer)
+	if err := json.NewEncoder(buf).Encode(send); err != nil {
+		return err
+	}
+	req, err := http.NewRequest("POST", urlstr, buf)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return httpDoWithToken(ctx, req, token, recv)
+}
+
 func jsonPUT(ctx context.Context, urlstr string, recv, send interface{}) error {
 	buf := new(bytes.Buffer)
 	if err := json.NewEncoder(buf).Encode(send); err != nil {

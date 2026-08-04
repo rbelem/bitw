@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -1017,4 +1018,264 @@ func TestSM_UUIDKeyFallback(t *testing.T) {
 	output := string(buf[:n])
 
 	qt.Assert(t, output, qt.Equals, "TEST\n")
+}
+
+// TestSM_ConfigKeyParsing verifies that loadConfig accepts sm_access_token.
+func TestSM_ConfigKeyParsing(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config")
+	err := os.WriteFile(configPath, []byte(`
+email = test@example.com
+sm_access_token = 0.client.secret:YQ==
+`), 0o600)
+	qt.Assert(t, err, qt.IsNil)
+
+	origSecrets := secrets
+	t.Cleanup(func() {
+		secrets = origSecrets
+	})
+
+	secrets = secretCache{}
+	err = loadConfig(tmpDir)
+	qt.Assert(t, err, qt.IsNil)
+	qt.Assert(t, secrets._configEmail, qt.Equals, "test@example.com")
+	qt.Assert(t, secrets._configSMAccessToken, qt.Equals, "0.client.secret:YQ==")
+}
+
+// TestSM_TokenResolutionPrecedence tests that env beats config.
+func TestSM_TokenResolutionPrecedence(t *testing.T) {
+	origSecrets := secrets
+	t.Cleanup(func() {
+		secrets = origSecrets
+	})
+
+	origEnv := os.Getenv("SM_ACCESS_TOKEN")
+	t.Cleanup(func() {
+		if origEnv != "" {
+			_ = os.Setenv("SM_ACCESS_TOKEN", origEnv)
+		} else {
+			_ = os.Unsetenv("SM_ACCESS_TOKEN")
+		}
+	})
+
+	// Test 1: env beats config
+	secrets = secretCache{_configSMAccessToken: "config-token"}
+	_ = os.Setenv("SM_ACCESS_TOKEN", "env-token")
+	qt.Assert(t, resolveSMAccessToken(), qt.Equals, "env-token")
+
+	// Test 2: config fallback when env is empty
+	_ = os.Unsetenv("SM_ACCESS_TOKEN")
+	qt.Assert(t, resolveSMAccessToken(), qt.Equals, "config-token")
+
+	// Test 3: empty when both are empty
+	secrets = secretCache{}
+	qt.Assert(t, resolveSMAccessToken(), qt.Equals, "")
+
+	// Test 4: whitespace-only env falls back to config
+	_ = os.Setenv("SM_ACCESS_TOKEN", "   \n\t  ")
+	secrets = secretCache{_configSMAccessToken: "config-token"}
+	qt.Assert(t, resolveSMAccessToken(), qt.Equals, "config-token")
+}
+
+// TestSM_CreateRequestShape tests the create request format.
+func TestSM_CreateRequestShape(t *testing.T) {
+	data, err := os.ReadFile("testdata/sm-kat.json")
+	qt.Assert(t, err, qt.IsNil)
+
+	var kat struct {
+		AccessToken      string `json:"access_token"`
+		EncryptedPayload string `json:"encrypted_payload"`
+	}
+	qt.Assert(t, json.Unmarshal(data, &kat), qt.IsNil)
+
+	var receivedBody map[string]interface{}
+	var receivedAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/connect/token" {
+			_ = json.NewEncoder(w).Encode(smTokenExchangeResponse{
+				AccessToken: makeTestJWT(map[string]interface{}{
+					"organization": "f4e44a7f-1190-432a-9d4a-af96013127cb",
+				}),
+				ExpiresIn:        3600,
+				TokenType:        "Bearer",
+				EncryptedPayload: kat.EncryptedPayload,
+			})
+		} else if r.URL.Path == "/secrets" && r.Method == "POST" {
+			receivedAuth = r.Header.Get("Authorization")
+			_ = json.NewDecoder(r.Body).Decode(&receivedBody)
+			_ = json.NewEncoder(w).Encode(smCreateResponse{
+				ID:             "new-secret-id",
+				OrganizationID: "f4e44a7f-1190-432a-9d4a-af96013127cb",
+				Key:            "encrypted-key",
+				Value:          "encrypted-value",
+			})
+		}
+	}))
+	defer server.Close()
+
+	origApiURL := apiURL
+	origIdtURL := idtURL
+	apiURL = server.URL
+	idtURL = server.URL
+	defer func() {
+		apiURL = origApiURL
+		idtURL = origIdtURL
+	}()
+
+	client, err := newSMClient(context.Background(), kat.AccessToken)
+	qt.Assert(t, err, qt.IsNil)
+
+	// Capture stdout
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err = client.smCreate(context.Background(), "test-key", "test-value")
+	qt.Assert(t, err, qt.IsNil)
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	buf := make([]byte, 1024)
+	n, _ := r.Read(buf)
+	output := string(buf[:n])
+
+	// Verify request body
+	qt.Assert(t, receivedBody["organizationId"], qt.Equals, "f4e44a7f-1190-432a-9d4a-af96013127cb")
+	qt.Assert(t, receivedBody["key"], qt.Equals, "test-key")
+	qt.Assert(t, receivedBody["value"], qt.Equals, "test-value")
+	qt.Assert(t, receivedBody["note"], qt.Equals, "")
+
+	// Verify Authorization header
+	qt.Assert(t, receivedAuth, qt.Contains, "Bearer ")
+
+	// Verify output is TSV: id\tkey
+	qt.Assert(t, output, qt.Equals, "new-secret-id\tencrypted-key\n")
+}
+
+// TestSM_CreateMissingArgs tests that create with missing args returns usage error.
+func TestSM_CreateMissingArgs(t *testing.T) {
+	origSecrets := secrets
+	t.Cleanup(func() {
+		secrets = origSecrets
+	})
+
+	origEnv := os.Getenv("SM_ACCESS_TOKEN")
+	t.Cleanup(func() {
+		if origEnv != "" {
+			_ = os.Setenv("SM_ACCESS_TOKEN", origEnv)
+		} else {
+			_ = os.Unsetenv("SM_ACCESS_TOKEN")
+		}
+	})
+
+	// Set a dummy token (args are checked before token validation)
+	_ = os.Setenv("SM_ACCESS_TOKEN", "dummy")
+
+	// No args after "create"
+	err := cmdSM(context.Background(), []string{"create"})
+	qt.Assert(t, err, qt.IsNotNil)
+	qt.Assert(t, err.Error(), qt.Contains, "usage: bitw sm create")
+
+	// Only one arg after "create"
+	err = cmdSM(context.Background(), []string{"create", "key-only"})
+	qt.Assert(t, err, qt.IsNotNil)
+	qt.Assert(t, err.Error(), qt.Contains, "usage: bitw sm create")
+}
+
+// TestSM_CreateStdinArgsParsing tests that --stdin is recognized as a flag, not a literal value.
+func TestSM_CreateStdinArgsParsing(t *testing.T) {
+	origSecrets := secrets
+	t.Cleanup(func() {
+		secrets = origSecrets
+	})
+
+	origEnv := os.Getenv("SM_ACCESS_TOKEN")
+	t.Cleanup(func() {
+		if origEnv != "" {
+			_ = os.Setenv("SM_ACCESS_TOKEN", origEnv)
+		} else {
+			_ = os.Unsetenv("SM_ACCESS_TOKEN")
+		}
+	})
+
+	// Set a dummy token
+	_ = os.Setenv("SM_ACCESS_TOKEN", "dummy")
+
+	// This should pass args validation (not return usage error)
+	// It will fail later when trying to create the client, but that's fine
+	// We're just verifying that "--stdin" is recognized as a flag
+	err := cmdSM(context.Background(), []string{"create", "test-key", "--stdin"})
+	// Should NOT be a usage error - it should get past args validation
+	qt.Assert(t, err, qt.IsNotNil)
+	qt.Assert(t, err.Error(), qt.Not(qt.Contains), "usage: bitw sm create")
+}
+
+// TestSM_CreateValueFromReader tests the smCreateValue helper with an injected reader.
+func TestSM_CreateValueFromReader(t *testing.T) {
+	data, err := os.ReadFile("testdata/sm-kat.json")
+	qt.Assert(t, err, qt.IsNil)
+
+	var kat struct {
+		AccessToken      string `json:"access_token"`
+		EncryptedPayload string `json:"encrypted_payload"`
+	}
+	qt.Assert(t, json.Unmarshal(data, &kat), qt.IsNil)
+
+	var receivedBody map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/connect/token" {
+			_ = json.NewEncoder(w).Encode(smTokenExchangeResponse{
+				AccessToken: makeTestJWT(map[string]interface{}{
+					"organization": "f4e44a7f-1190-432a-9d4a-af96013127cb",
+				}),
+				ExpiresIn:        3600,
+				TokenType:        "Bearer",
+				EncryptedPayload: kat.EncryptedPayload,
+			})
+		} else if r.URL.Path == "/secrets" && r.Method == "POST" {
+			_ = json.NewDecoder(r.Body).Decode(&receivedBody)
+			_ = json.NewEncoder(w).Encode(smCreateResponse{
+				ID:             "new-secret-id",
+				OrganizationID: "f4e44a7f-1190-432a-9d4a-af96013127cb",
+				Key:            "encrypted-key",
+				Value:          "encrypted-value",
+			})
+		}
+	}))
+	defer server.Close()
+
+	origApiURL := apiURL
+	origIdtURL := idtURL
+	apiURL = server.URL
+	idtURL = server.URL
+	defer func() {
+		apiURL = origApiURL
+		idtURL = origIdtURL
+	}()
+
+	client, err := newSMClient(context.Background(), kat.AccessToken)
+	qt.Assert(t, err, qt.IsNil)
+
+	// Capture stdout
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	// Test with a multi-line value injected via strings.Reader
+	multiLineValue := "line1\nline2\nline3"
+	err = client.smCreateValue(context.Background(), "test-key", strings.NewReader(multiLineValue))
+	qt.Assert(t, err, qt.IsNil)
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	buf := make([]byte, 1024)
+	n, _ := r.Read(buf)
+	output := string(buf[:n])
+
+	// Verify the multi-line value was preserved exactly
+	qt.Assert(t, receivedBody["value"], qt.Equals, multiLineValue)
+	qt.Assert(t, receivedBody["key"], qt.Equals, "test-key")
+	qt.Assert(t, output, qt.Equals, "new-secret-id\tencrypted-key\n")
 }

@@ -292,6 +292,8 @@ func loadConfig(dir string) error {
 				secrets._configClientID = section.Get(key)
 			case "clientsecret":
 				secrets._configClientSecret = section.Get(key)
+			case "sm_access_token":
+				secrets._configSMAccessToken = section.Get(key)
 			default:
 				return fmt.Errorf("unknown config key: %q", key)
 			}

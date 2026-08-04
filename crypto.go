@@ -39,12 +39,13 @@ const (
 type secretCache struct {
 	data *dataFile
 
-	_password           []byte // cached, to avoid repeated prompts
-	_configEmail        string
-	_configClientID     string
-	_configClientSecret string
-	_clientId           []byte
-	_clientSecret       []byte
+	_password            []byte // cached, to avoid repeated prompts
+	_configEmail         string
+	_configClientID      string
+	_configClientSecret  string
+	_configSMAccessToken string
+	_clientId            []byte
+	_clientSecret        []byte
 
 	// TODO: store these more securely
 	key    []byte

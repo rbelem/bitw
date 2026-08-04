@@ -483,14 +483,78 @@ func smError(err error, context string) error {
 	return fmt.Errorf("%s: %w", context, err)
 }
 
+// resolveSMAccessToken returns the SM access token from env or config.
+// Env takes precedence over config. Returns empty string if neither is set.
+func resolveSMAccessToken() string {
+	rawToken := strings.TrimSpace(os.Getenv("SM_ACCESS_TOKEN"))
+	if rawToken == "" {
+		rawToken = strings.TrimSpace(secrets._configSMAccessToken)
+	}
+	return rawToken
+}
+
+// smCreateResponse is the response from POST /secrets
+type smCreateResponse struct {
+	ID             string `json:"id"`
+	OrganizationID string `json:"organizationId"`
+	Key            string `json:"key"`
+	Value          string `json:"value"`
+	Note           string `json:"note"`
+	CreationDate   string `json:"creationDate"`
+	RevisionDate   string `json:"revisionDate"`
+}
+
+// smCreate creates a new secret in the organization.
+func (c *smClient) smCreate(ctx context.Context, key, value string) error {
+	url := fmt.Sprintf("%s/secrets", apiURL)
+
+	body := map[string]interface{}{
+		"organizationId": c.orgID,
+		"key":            key,
+		"value":          value,
+		"note":           "",
+	}
+
+	var resp smCreateResponse
+	if err := jsonPOSTWithToken(ctx, url, c.apiToken, &resp, body); err != nil {
+		return smError(err, "create secret")
+	}
+
+	// Print TSV: id\tkey (matches list output style)
+	fmt.Printf("%s\t%s\n", resp.ID, resp.Key)
+	return nil
+}
+
+// smCreateValue creates a new secret, reading the value from the provided reader.
+// This is a testable helper that separates stdin reading from the create logic.
+func (c *smClient) smCreateValue(ctx context.Context, key string, valueReader io.Reader) error {
+	data, err := io.ReadAll(valueReader)
+	if err != nil {
+		return fmt.Errorf("failed to read value: %w", err)
+	}
+	return c.smCreate(ctx, key, string(data))
+}
+
 // cmdSM is the entry point for `bitw sm` commands.
 func cmdSM(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: bitw sm <list|get> [args]")
+		return fmt.Errorf("usage: bitw sm <list|get|create> [args]")
 	}
 
-	// Trim whitespace to tolerate trailing newlines/spaces from env vars.
-	rawToken := strings.TrimSpace(os.Getenv("SM_ACCESS_TOKEN"))
+	// Check args early to avoid unnecessary token validation/network calls.
+	switch args[0] {
+	case "get":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: bitw sm get <key-or-id>")
+		}
+	case "create":
+		if len(args) < 3 {
+			return fmt.Errorf("usage: bitw sm create <key> <value> or bitw sm create <key> --stdin")
+		}
+	}
+
+	// Resolve token with env-first, config-fallback precedence.
+	rawToken := resolveSMAccessToken()
 	if rawToken == "" {
 		return fmt.Errorf("SM_ACCESS_TOKEN environment variable is not set")
 	}
@@ -504,11 +568,13 @@ func cmdSM(ctx context.Context, args []string) error {
 	case "list":
 		return client.smList(ctx)
 	case "get":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: bitw sm get <key-or-id>")
-		}
 		return client.smGet(ctx, args[1])
+	case "create":
+		if args[2] == "--stdin" {
+			return client.smCreateValue(ctx, args[1], os.Stdin)
+		}
+		return client.smCreate(ctx, args[1], args[2])
 	default:
-		return fmt.Errorf("unknown sm command: %q (use list or get)", args[0])
+		return fmt.Errorf("unknown sm command: %q (use list, get, or create)", args[0])
 	}
 }
