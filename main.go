@@ -24,7 +24,12 @@ import (
 
 var flagSet = flag.NewFlagSet("bitw", flag.ContinueOnError)
 
-func init() { flagSet.Usage = usage }
+var showVersion bool
+
+func init() {
+	flagSet.BoolVar(&showVersion, "version", false, "print the version and exit")
+	flagSet.Usage = usage
+}
 
 func usage() {
 	fmt.Fprint(os.Stderr, `
@@ -56,6 +61,12 @@ func main() { os.Exit(main1(os.Stderr)) }
 func main1(stderr io.Writer) int {
 	if err := flagSet.Parse(os.Args[1:]); err != nil {
 		return 2
+	}
+	if showVersion {
+		// Short-circuit before any config/data loading: --version must
+		// work even with no config dir, no vault, no network.
+		fmt.Printf("bitw %s\n", version)
+		return 0
 	}
 	args := flagSet.Args()
 	if err := run(args...); err != nil {

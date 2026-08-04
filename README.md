@@ -66,6 +66,23 @@ Note: the names file stores decrypted item names on disk (0600) so tab
 completion works without a password prompt. Item names are not treated as
 secrets; delete the file to disable name completion.
 
+#### Releasing
+
+Release versions are stamped in `version.go` and printed by `bitw --version`.
+This is distinct from the wire-protocol `clientVersion` constant in `api.go`
+(what Bitwarden servers see; tracks upstream bitwarden/clients).
+
+To release a new version:
+
+	./release.sh 0.1.2
+
+The script bumps `version.go`, runs the test suite, commits, and pushes the
+`v0.1.2` tag. Pushing a `v*` tag triggers the Release workflow
+(`.github/workflows/release.yml`), which builds the platform binaries and
+creates the GitHub release with generated notes. The script refuses to run on
+a dirty tree or if `version.go` doesn't match the previous tag (releases must
+be sequential); the very first release must be tagged manually.
+
 #### Secrets Manager
 
 Read-only support for Bitwarden Secrets Manager (machine accounts). Set
