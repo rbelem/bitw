@@ -193,9 +193,9 @@ func TestSM_ExchangeRequestShape(t *testing.T) {
 	var receivedForm url.Values
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/connect/token" {
-			r.ParseForm()
+			_ = r.ParseForm()
 			receivedForm = r.Form
-			json.NewEncoder(w).Encode(smTokenExchangeResponse{
+			_ = json.NewEncoder(w).Encode(smTokenExchangeResponse{
 				AccessToken: makeTestJWT(map[string]interface{}{
 					"organization": "f4e44a7f-1190-432a-9d4a-af96013127cb",
 				}),
@@ -254,17 +254,18 @@ func TestSM_ListDecoding(t *testing.T) {
 
 	// Create a mock API server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/connect/token" {
+		switch {
+		case r.URL.Path == "/connect/token":
 			jwt := makeTestJWT(map[string]interface{}{
 				"organization": "f4e44a7f-1190-432a-9d4a-af96013127cb",
 			})
-			json.NewEncoder(w).Encode(smTokenExchangeResponse{
+			_ = json.NewEncoder(w).Encode(smTokenExchangeResponse{
 				AccessToken:      jwt,
 				ExpiresIn:        3600,
 				TokenType:        "Bearer",
 				EncryptedPayload: kat.EncryptedPayload,
 			})
-		} else if strings.HasPrefix(r.URL.Path, "/organizations/") && strings.HasSuffix(r.URL.Path, "/secrets") {
+		case strings.HasPrefix(r.URL.Path, "/organizations/") && strings.HasSuffix(r.URL.Path, "/secrets"):
 			// Return list with the fixture secret
 			resp := smListResponse{
 				Object: "SecretsWithProjectsList",
@@ -278,7 +279,7 @@ func TestSM_ListDecoding(t *testing.T) {
 				},
 				Projects: []smListProject{},
 			}
-			json.NewEncoder(w).Encode(resp)
+			_ = json.NewEncoder(w).Encode(resp)
 		}
 	}))
 	defer server.Close()
@@ -304,7 +305,7 @@ func TestSM_ListDecoding(t *testing.T) {
 	err = client.smList(context.Background())
 	qt.Assert(t, err, qt.IsNil)
 
-	w.Close()
+	_ = w.Close()
 	os.Stdout = oldStdout
 
 	buf := make([]byte, 1024)
@@ -329,8 +330,9 @@ func TestSM_GetByID(t *testing.T) {
 	qt.Assert(t, json.Unmarshal(data, &kat), qt.IsNil)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/connect/token" {
-			json.NewEncoder(w).Encode(smTokenExchangeResponse{
+		switch r.URL.Path {
+		case "/connect/token":
+			_ = json.NewEncoder(w).Encode(smTokenExchangeResponse{
 				AccessToken: makeTestJWT(map[string]interface{}{
 					"organization": "f4e44a7f-1190-432a-9d4a-af96013127cb",
 				}),
@@ -338,12 +340,11 @@ func TestSM_GetByID(t *testing.T) {
 				TokenType:        "Bearer",
 				EncryptedPayload: kat.EncryptedPayload,
 			})
-		} else if r.URL.Path == "/secrets/"+kat.SecretID {
-			resp := smSecretResponse{
+		case "/secrets/" + kat.SecretID:
+			_ = json.NewEncoder(w).Encode(smSecretResponse{
 				ID:    kat.SecretID,
 				Value: kat.SecretValue,
-			}
-			json.NewEncoder(w).Encode(resp)
+			})
 		}
 	}))
 	defer server.Close()
@@ -368,7 +369,7 @@ func TestSM_GetByID(t *testing.T) {
 	err = client.smGet(context.Background(), kat.SecretID)
 	qt.Assert(t, err, qt.IsNil)
 
-	w.Close()
+	_ = w.Close()
 	os.Stdout = oldStdout
 
 	buf := make([]byte, 1024)
@@ -394,7 +395,7 @@ func TestSM_GetByKey(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/connect/token" {
-			json.NewEncoder(w).Encode(smTokenExchangeResponse{
+			_ = json.NewEncoder(w).Encode(smTokenExchangeResponse{
 				AccessToken: makeTestJWT(map[string]interface{}{
 					"organization": "f4e44a7f-1190-432a-9d4a-af96013127cb",
 				}),
@@ -411,13 +412,13 @@ func TestSM_GetByKey(t *testing.T) {
 					},
 				},
 			}
-			json.NewEncoder(w).Encode(resp)
+			_ = json.NewEncoder(w).Encode(resp)
 		} else if r.URL.Path == "/secrets/"+kat.SecretID {
 			resp := smSecretResponse{
 				ID:    kat.SecretID,
 				Value: kat.SecretValue,
 			}
-			json.NewEncoder(w).Encode(resp)
+			_ = json.NewEncoder(w).Encode(resp)
 		}
 	}))
 	defer server.Close()
@@ -442,7 +443,7 @@ func TestSM_GetByKey(t *testing.T) {
 	err = client.smGet(context.Background(), "TEST")
 	qt.Assert(t, err, qt.IsNil)
 
-	w.Close()
+	_ = w.Close()
 	os.Stdout = oldStdout
 
 	buf := make([]byte, 1024)
@@ -468,7 +469,7 @@ func TestSM_GetFuzzy(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/connect/token" {
-			json.NewEncoder(w).Encode(smTokenExchangeResponse{
+			_ = json.NewEncoder(w).Encode(smTokenExchangeResponse{
 				AccessToken: makeTestJWT(map[string]interface{}{
 					"organization": "f4e44a7f-1190-432a-9d4a-af96013127cb",
 				}),
@@ -485,13 +486,13 @@ func TestSM_GetFuzzy(t *testing.T) {
 					},
 				},
 			}
-			json.NewEncoder(w).Encode(resp)
+			_ = json.NewEncoder(w).Encode(resp)
 		} else if r.URL.Path == "/secrets/"+kat.SecretID {
 			resp := smSecretResponse{
 				ID:    kat.SecretID,
 				Value: kat.SecretValue,
 			}
-			json.NewEncoder(w).Encode(resp)
+			_ = json.NewEncoder(w).Encode(resp)
 		}
 	}))
 	defer server.Close()
@@ -517,7 +518,7 @@ func TestSM_GetFuzzy(t *testing.T) {
 	err = client.smGet(context.Background(), "TES")
 	qt.Assert(t, err, qt.IsNil)
 
-	w.Close()
+	_ = w.Close()
 	os.Stdout = oldStdout
 
 	buf := make([]byte, 1024)
@@ -540,7 +541,7 @@ func TestSM_GetNotFound(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/connect/token" {
-			json.NewEncoder(w).Encode(smTokenExchangeResponse{
+			_ = json.NewEncoder(w).Encode(smTokenExchangeResponse{
 				AccessToken: makeTestJWT(map[string]interface{}{
 					"organization": "f4e44a7f-1190-432a-9d4a-af96013127cb",
 				}),
@@ -552,7 +553,7 @@ func TestSM_GetNotFound(t *testing.T) {
 			resp := smListResponse{
 				Secrets: []smListSecret{},
 			}
-			json.NewEncoder(w).Encode(resp)
+			_ = json.NewEncoder(w).Encode(resp)
 		}
 	}))
 	defer server.Close()
@@ -613,7 +614,7 @@ func TestSM_ErrorPaths(t *testing.T) {
 
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/connect/token" {
-					json.NewEncoder(w).Encode(smTokenExchangeResponse{
+					_ = json.NewEncoder(w).Encode(smTokenExchangeResponse{
 						AccessToken: makeTestJWT(map[string]interface{}{
 							"organization": "f4e44a7f-1190-432a-9d4a-af96013127cb",
 						}),
@@ -649,10 +650,10 @@ func TestSM_ErrorPaths(t *testing.T) {
 // TestSM_UnsetToken tests error when SM_ACCESS_TOKEN is not set.
 func TestSM_UnsetToken(t *testing.T) {
 	origToken := os.Getenv("SM_ACCESS_TOKEN")
-	os.Unsetenv("SM_ACCESS_TOKEN")
+	_ = os.Unsetenv("SM_ACCESS_TOKEN")
 	defer func() {
 		if origToken != "" {
-			os.Setenv("SM_ACCESS_TOKEN", origToken)
+			_ = os.Setenv("SM_ACCESS_TOKEN", origToken)
 		}
 	}()
 
@@ -718,7 +719,7 @@ func TestSM_TokenWhitespace(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/connect/token" {
-			json.NewEncoder(w).Encode(smTokenExchangeResponse{
+			_ = json.NewEncoder(w).Encode(smTokenExchangeResponse{
 				AccessToken: makeTestJWT(map[string]interface{}{
 					"organization": "f4e44a7f-1190-432a-9d4a-af96013127cb",
 				}),
@@ -727,7 +728,7 @@ func TestSM_TokenWhitespace(t *testing.T) {
 				EncryptedPayload: kat.EncryptedPayload,
 			})
 		} else if strings.HasSuffix(r.URL.Path, "/secrets") {
-			json.NewEncoder(w).Encode(smListResponse{})
+			_ = json.NewEncoder(w).Encode(smListResponse{})
 		}
 	}))
 	defer server.Close()
@@ -744,12 +745,12 @@ func TestSM_TokenWhitespace(t *testing.T) {
 	// Token with leading space + trailing \n should work
 	tokenWithWhitespace := " " + kat.AccessToken + "\n"
 	origToken := os.Getenv("SM_ACCESS_TOKEN")
-	os.Setenv("SM_ACCESS_TOKEN", tokenWithWhitespace)
+	_ = os.Setenv("SM_ACCESS_TOKEN", tokenWithWhitespace)
 	defer func() {
 		if origToken != "" {
-			os.Setenv("SM_ACCESS_TOKEN", origToken)
+			_ = os.Setenv("SM_ACCESS_TOKEN", origToken)
 		} else {
-			os.Unsetenv("SM_ACCESS_TOKEN")
+			_ = os.Unsetenv("SM_ACCESS_TOKEN")
 		}
 	}()
 
@@ -761,12 +762,12 @@ func TestSM_TokenWhitespace(t *testing.T) {
 // as unset (M1).
 func TestSM_TokenWhitespaceOnly(t *testing.T) {
 	origToken := os.Getenv("SM_ACCESS_TOKEN")
-	os.Setenv("SM_ACCESS_TOKEN", "   \n\t  ")
+	_ = os.Setenv("SM_ACCESS_TOKEN", "   \n\t  ")
 	defer func() {
 		if origToken != "" {
-			os.Setenv("SM_ACCESS_TOKEN", origToken)
+			_ = os.Setenv("SM_ACCESS_TOKEN", origToken)
 		} else {
-			os.Unsetenv("SM_ACCESS_TOKEN")
+			_ = os.Unsetenv("SM_ACCESS_TOKEN")
 		}
 	}()
 
@@ -789,7 +790,7 @@ func TestSM_AmbiguousKey(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/connect/token" {
-			json.NewEncoder(w).Encode(smTokenExchangeResponse{
+			_ = json.NewEncoder(w).Encode(smTokenExchangeResponse{
 				AccessToken: makeTestJWT(map[string]interface{}{
 					"organization": "f4e44a7f-1190-432a-9d4a-af96013127cb",
 				}),
@@ -805,7 +806,7 @@ func TestSM_AmbiguousKey(t *testing.T) {
 					{ID: "id-2", Key: kat.SecretKey},
 				},
 			}
-			json.NewEncoder(w).Encode(resp)
+			_ = json.NewEncoder(w).Encode(resp)
 		}
 	}))
 	defer server.Close()
@@ -829,7 +830,7 @@ func TestSM_AmbiguousKey(t *testing.T) {
 
 	err = client.smGet(context.Background(), "TEST")
 
-	w.Close()
+	_ = w.Close()
 	os.Stdout = oldStdout
 
 	buf := make([]byte, 1024)
@@ -847,7 +848,7 @@ func TestSM_AmbiguousKey(t *testing.T) {
 func TestSM_Exchange401(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/connect/token" {
-			http.Error(w, "invalid token", 401)
+			http.Error(w, "invalid token", http.StatusUnauthorized)
 		}
 	}))
 	defer server.Close()
@@ -882,7 +883,7 @@ func TestSM_List404IncludesContext(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/connect/token" {
-			json.NewEncoder(w).Encode(smTokenExchangeResponse{
+			_ = json.NewEncoder(w).Encode(smTokenExchangeResponse{
 				AccessToken: makeTestJWT(map[string]interface{}{
 					"organization": "f4e44a7f-1190-432a-9d4a-af96013127cb",
 				}),
@@ -954,7 +955,7 @@ func TestSM_UUIDKeyFallback(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/connect/token" {
-			json.NewEncoder(w).Encode(smTokenExchangeResponse{
+			_ = json.NewEncoder(w).Encode(smTokenExchangeResponse{
 				AccessToken: makeTestJWT(map[string]interface{}{
 					"organization": "f4e44a7f-1190-432a-9d4a-af96013127cb",
 				}),
@@ -975,14 +976,14 @@ func TestSM_UUIDKeyFallback(t *testing.T) {
 					},
 				},
 			}
-			json.NewEncoder(w).Encode(resp)
+			_ = json.NewEncoder(w).Encode(resp)
 		} else if r.URL.Path == "/secrets/"+kat.SecretID {
 			// Third request: fetch by real ID
 			resp := smSecretResponse{
 				ID:    kat.SecretID,
 				Value: kat.SecretValue,
 			}
-			json.NewEncoder(w).Encode(resp)
+			_ = json.NewEncoder(w).Encode(resp)
 		}
 	}))
 	defer server.Close()
@@ -1008,7 +1009,7 @@ func TestSM_UUIDKeyFallback(t *testing.T) {
 	err = client.smGet(context.Background(), uuidKey)
 	qt.Assert(t, err, qt.IsNil)
 
-	w.Close()
+	_ = w.Close()
 	os.Stdout = oldStdout
 
 	buf := make([]byte, 1024)

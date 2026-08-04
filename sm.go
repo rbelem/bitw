@@ -347,7 +347,6 @@ func (c *smClient) smGet(ctx context.Context, keyOrID string) error {
 				return smError(err, "get secret")
 			}
 		} else {
-			secretID = keyOrID
 			// Decrypt value
 			value, err := c.decryptSMField(resp.Value)
 			if err != nil {

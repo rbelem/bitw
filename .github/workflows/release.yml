@@ -1,0 +1,55 @@
+# Tag pushes (v*) build the binaries and create the GitHub release.
+# The version is stamped in version.go by release.sh before tagging, so
+# the checkout at the tag already carries the right version.
+on:
+  push:
+    tags:
+    - 'v*'
+name: Release
+permissions:
+  contents: write
+  attestations: write
+  id-token: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        # Full history so --generate-notes can build the changelog.
+        fetch-depth: 0
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: 1.26.x
+
+    # Same network-test secrets as test.yml.
+    - run: go test -race -v ./...
+      env:
+        PASSWORD_NOTFA: ${{ secrets.PASSWORD_NOTFA }}
+        PASSWORD_WITHTFA: ${{ secrets.PASSWORD_WITHTFA }}
+        TFAKEY: ${{ secrets.TFAKEY }}
+
+    - name: Build
+      run: |
+        set -euo pipefail
+        for target in "linux/amd64" "linux/arm64" "darwin/arm64"; do
+          os=${target%/*}
+          arch=${target#*/}
+          GOOS=$os GOARCH=$arch go build -o "bitw-$os-$arch" .
+        done
+
+    # Prove binary origin: records the build + repo provenance for each
+    # artifact (standard practice for public-release binaries).
+    - name: Attest build provenance
+      uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+      with:
+        subject-path: bitw-linux-amd64 bitw-linux-arm64 bitw-darwin-arm64
+
+    - name: Release
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh release create "$GITHUB_REF_NAME" \
+          --title "$GITHUB_REF_NAME" \
+          --generate-notes \
+          bitw-linux-amd64 bitw-linux-arm64 bitw-darwin-arm64

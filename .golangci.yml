@@ -1,0 +1,18 @@
+# golangci-lint v2 configuration. Enforced diff-only in CI
+# (--new-from-rev=HEAD~1), so pre-existing issues don't block new work.
+version: "2"
+linters:
+  default: none
+  enable:
+    - errcheck # unchecked errors
+    - govet   # suspicious constructs
+    - ineffassign # ineffectual assignments
+    - staticcheck # superset of go vet / gosimple
+    - unused  # unused code
+    - gosec   # security issues (this CLI handles secrets)
+  exclusions:
+    rules:
+      # gosec on test files is noise: fixtures and mocks trip G101/G117
+      # (hardcoded credentials / secret-shaped struct fields).
+      - linters: [gosec]
+        path: _test\.go

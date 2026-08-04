@@ -71,6 +71,8 @@ func jsonGET(ctx context.Context, urlstr string, recv interface{}) error {
 // jsonGETWithToken is jsonGET with an explicit bearer token, for clients
 // that do not use the vault token in globalData (e.g. Secrets Manager).
 func jsonGETWithToken(ctx context.Context, urlstr, token string, recv interface{}) error {
+	//nolint:gosec // urlstr comes from the user's own config (apiURL/idtURL),
+	// not from untrusted input; the same pattern as jsonGET above.
 	req, err := http.NewRequest("GET", urlstr, nil)
 	if err != nil {
 		return err

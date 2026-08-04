@@ -1,5 +1,7 @@
 on: [push, pull_request]
 name: Test
+permissions:
+  contents: read
 jobs:
   test:
     strategy:
@@ -12,15 +14,15 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/setup-go@v3
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ matrix.go-version }}
-    - uses: actions/checkout@v3
     - if: matrix.os == 'ubuntu-latest'
       run: sudo apt update && sudo apt install -y --no-install-recommends libsecret-tools
     - run: go install rsc.io/2fa
 
-    - run: PATH="$(go env GOPATH)/bin:$PATH" go test -v ./...
+    - run: PATH="$(go env GOPATH)/bin:$PATH" go test -race -v ./...
       env:
         PASSWORD_NOTFA: ${{ secrets.PASSWORD_NOTFA }}
         PASSWORD_WITHTFA: ${{ secrets.PASSWORD_WITHTFA }}
@@ -32,3 +34,12 @@ jobs:
       run: diff <(echo -n) <(gofmt -s -d .)
     - if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.26.x'
       run: go vet ./...
+    - if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.26.x'
+      uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+      with:
+        # Diff-only: only flag issues introduced since the base of the PR.
+        args: --new-from-rev=HEAD~1
+    - if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.26.x'
+      run: |
+        go install golang.org/x/vuln/cmd/govulncheck@latest
+        "$(go env GOPATH)/bin/govulncheck" ./...
