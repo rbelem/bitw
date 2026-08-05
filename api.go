@@ -108,6 +108,21 @@ func jsonPUT(ctx context.Context, urlstr string, recv, send interface{}) error {
 	return httpDo(ctx, req, recv)
 }
 
+// jsonPUTWithToken is jsonPUT with an explicit bearer token, for clients
+// that do not use the vault token in globalData (e.g. Secrets Manager).
+func jsonPUTWithToken(ctx context.Context, urlstr, token string, recv, send interface{}) error {
+	buf := new(bytes.Buffer)
+	if err := json.NewEncoder(buf).Encode(send); err != nil {
+		return err
+	}
+	req, err := http.NewRequest("PUT", urlstr, buf)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return httpDoWithToken(ctx, req, token, recv)
+}
+
 func httpDo(ctx context.Context, req *http.Request, recv interface{}) error {
 	// Read the token directly from globalData instead of ctx. This ensures
 	// that after ensureToken re-authenticates (via login/refreshToken), the

@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -169,13 +170,14 @@ type smListProject struct {
 
 // smSecretResponse is the response from /secrets/{id}
 type smSecretResponse struct {
-	ID             string `json:"id"`
-	OrganizationID string `json:"organizationId"`
-	Key            string `json:"key"`
-	Value          string `json:"value"`
-	Note           string `json:"note"`
-	CreationDate   string `json:"creationDate"`
-	RevisionDate   string `json:"revisionDate"`
+	ID             string          `json:"id"`
+	OrganizationID string          `json:"organizationId"`
+	Key            string          `json:"key"`
+	Value          string          `json:"value"`
+	Note           string          `json:"note"`
+	Projects       []smListProject `json:"projects"`
+	CreationDate   string          `json:"creationDate"`
+	RevisionDate   string          `json:"revisionDate"`
 }
 
 // smClient holds the state for a Secrets Manager session.
@@ -183,6 +185,27 @@ type smClient struct {
 	apiToken string
 	orgKey   []byte // 64 bytes (first 32 = enc, last 32 = mac)
 	orgID    string
+
+	// listCache holds the /organizations/{orgID}/secrets response so
+	// resolveProjectID, findSecretByKey, and findSecretByFuzzy each
+	// make at most one HTTP call per command.
+	listCache *smListResponse
+}
+
+// listSecrets fetches (or returns cached) the list of secrets and projects
+// for the organization. All SM sub-commands that need the full list should
+// call this method instead of issuing their own GET.
+func (c *smClient) listSecrets(ctx context.Context) (*smListResponse, error) {
+	if c.listCache != nil {
+		return c.listCache, nil
+	}
+	url := fmt.Sprintf("%s/organizations/%s/secrets", apiURL, c.orgID)
+	var resp smListResponse
+	if err := jsonGETWithToken(ctx, url, c.apiToken, &resp); err != nil {
+		return nil, err
+	}
+	c.listCache = &resp
+	return &resp, nil
 }
 
 // newSMClient creates a new SM client by parsing the token, deriving keys,
@@ -266,6 +289,23 @@ func (c *smClient) decryptSMField(encStr string) (string, error) {
 	return string(dec), nil
 }
 
+// encryptSMField encrypts a plaintext string with the org key and returns
+// a serialized CipherString suitable for the SM API wire format.
+func (c *smClient) encryptSMField(plain string) (string, error) {
+	if plain == "" {
+		return "", nil
+	}
+	cs, err := encryptWith([]byte(plain), AesCbc256_HmacSha256_B64, c.orgKey[:32], c.orgKey[32:])
+	if err != nil {
+		return "", fmt.Errorf("could not encrypt field: %w", err)
+	}
+	b, err := cs.MarshalText()
+	if err != nil {
+		return "", fmt.Errorf("could not serialize cipher string: %w", err)
+	}
+	return string(b), nil
+}
+
 // decryptProjectName defensively decrypts a project name. If it looks like
 // an EncString (has a "|"), decrypt it; otherwise use as-is. If decryption
 // fails, the raw name is returned (the only caller discards the error).
@@ -282,11 +322,9 @@ func (c *smClient) decryptProjectName(name string) string {
 
 // smList lists all secrets in the organization.
 func (c *smClient) smList(ctx context.Context) error {
-	url := fmt.Sprintf("%s/organizations/%s/secrets", apiURL, c.orgID)
-
-	var resp smListResponse
-	if err := jsonGETWithToken(ctx, url, c.apiToken, &resp); err != nil {
-		return smError(err, "list secrets")
+	resp, err := c.listSecrets(ctx)
+	if err != nil {
+		return smListError(err, "list secrets")
 	}
 
 	// Decrypt and collect results
@@ -297,9 +335,10 @@ func (c *smClient) smList(ctx context.Context) error {
 	var entries []smEntry
 
 	for _, s := range resp.Secrets {
-		key, err := c.decryptSMField(s.Key)
-		if err != nil {
-			return fmt.Errorf("could not decrypt secret key: %w", err)
+		key, decryptErr := c.decryptSMField(s.Key)
+		if decryptErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: skipping secret %s: could not decrypt key: %v\n", s.ID, decryptErr)
+			continue
 		}
 
 		// Decrypt project names defensively
@@ -330,78 +369,75 @@ func (c *smClient) smList(ctx context.Context) error {
 }
 
 // smGet retrieves a secret by key or ID.
-func (c *smClient) smGet(ctx context.Context, keyOrID string) error {
-	var secretID string
-
-	// Try to parse as UUID
-	if _, err := uuid.Parse(keyOrID); err == nil {
-		// Try direct UUID fetch first
-		url := fmt.Sprintf("%s/secrets/%s", apiURL, keyOrID)
-		var resp smSecretResponse
-		if err := jsonGETWithToken(ctx, url, c.apiToken, &resp); err != nil {
-			// On 404, fall through to key/fuzzy search — the key
-			// might be a valid UUID format but not an actual secret ID.
-			if errsc, ok := err.(*errStatusCode); ok && errsc.code == 404 {
-				secretID = ""
-			} else {
-				return smError(err, "get secret")
-			}
-		} else {
-			// Decrypt value
-			value, err := c.decryptSMField(resp.Value)
-			if err != nil {
-				return fmt.Errorf("could not decrypt secret value: %w", err)
-			}
-			fmt.Println(value)
-			return nil
-		}
+func (c *smClient) smGet(ctx context.Context, keyOrID, projectName string) error {
+	secretID, err := c.resolveSecretID(ctx, keyOrID, projectName)
+	if err != nil {
+		return err
 	}
-
-	if secretID == "" {
-		// List and find by exact key match
-		var err error
-		secretID, err = c.findSecretByKey(ctx, keyOrID)
-		if err != nil {
-			return err
-		}
-		if secretID == "" {
-			// Try fuzzy match
-			secretID = c.findSecretByFuzzy(ctx, keyOrID)
-			if secretID == "" {
-				return fmt.Errorf("secret %q not found", keyOrID)
-			}
-		}
+	resp, err := c.fetchSecret(ctx, secretID)
+	if err != nil {
+		return err
 	}
-
-	// Fetch the secret
-	url := fmt.Sprintf("%s/secrets/%s", apiURL, secretID)
-	var resp smSecretResponse
-	if err := jsonGETWithToken(ctx, url, c.apiToken, &resp); err != nil {
-		return smError(err, "get secret")
-	}
-
-	// Decrypt value
 	value, err := c.decryptSMField(resp.Value)
 	if err != nil {
 		return fmt.Errorf("could not decrypt secret value: %w", err)
 	}
-
 	fmt.Println(value)
 	return nil
 }
 
+// secretInProject reports whether a secret belongs to a project with the
+// given name. Project names may be encrypted or plaintext; we decrypt
+// defensively before comparing.
+func (c *smClient) secretInProject(s smListSecret, projectName string) bool {
+	for _, p := range s.Projects {
+		if c.decryptProjectName(p.Name) == projectName {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveProjectID resolves a project name to its UUID by listing projects
+// from the organization and matching the name (decrypting defensively).
+func (c *smClient) resolveProjectID(ctx context.Context, projectName string) (string, error) {
+	resp, err := c.listSecrets(ctx)
+	if err != nil {
+		return "", smListError(err, "list projects")
+	}
+
+	var matched []smListProject
+	for _, p := range resp.Projects {
+		decName := c.decryptProjectName(p.Name)
+		if decName == projectName {
+			matched = append(matched, p)
+		}
+	}
+
+	if len(matched) == 0 {
+		return "", fmt.Errorf("project %q not found", projectName)
+	}
+	if len(matched) > 1 {
+		return "", fmt.Errorf("project name %q is ambiguous: %d projects match; use the project id instead",
+			projectName, len(matched))
+	}
+	return matched[0].ID, nil
+}
+
 // findSecretByKey lists secrets and returns the ID of the one with exact key match.
 // If multiple secrets share the same key, returns an error listing the duplicates.
-func (c *smClient) findSecretByKey(ctx context.Context, key string) (string, error) {
-	url := fmt.Sprintf("%s/organizations/%s/secrets", apiURL, c.orgID)
-
-	var resp smListResponse
-	if err := jsonGETWithToken(ctx, url, c.apiToken, &resp); err != nil {
-		return "", nil
+func (c *smClient) findSecretByKey(ctx context.Context, key, projectName string) (string, error) {
+	resp, err := c.listSecrets(ctx)
+	if err != nil {
+		return "", err
 	}
 
 	var matches []smListSecret
 	for _, s := range resp.Secrets {
+		// Apply project filter if specified
+		if projectName != "" && !c.secretInProject(s, projectName) {
+			continue
+		}
 		decKey, err := c.decryptSMField(s.Key)
 		if err != nil {
 			continue
@@ -427,12 +463,10 @@ func (c *smClient) findSecretByKey(ctx context.Context, key string) (string, err
 }
 
 // findSecretByFuzzy lists secrets and returns the ID of the best fuzzy match.
-func (c *smClient) findSecretByFuzzy(ctx context.Context, query string) string {
-	url := fmt.Sprintf("%s/organizations/%s/secrets", apiURL, c.orgID)
-
-	var resp smListResponse
-	if err := jsonGETWithToken(ctx, url, c.apiToken, &resp); err != nil {
-		return ""
+func (c *smClient) findSecretByFuzzy(ctx context.Context, query, projectName string) (string, error) {
+	resp, err := c.listSecrets(ctx)
+	if err != nil {
+		return "", err
 	}
 
 	// Build name list
@@ -444,6 +478,10 @@ func (c *smClient) findSecretByFuzzy(ctx context.Context, query string) string {
 	var names []string
 
 	for _, s := range resp.Secrets {
+		// Apply project filter if specified
+		if projectName != "" && !c.secretInProject(s, projectName) {
+			continue
+		}
 		decKey, err := c.decryptSMField(s.Key)
 		if err != nil {
 			continue
@@ -458,23 +496,86 @@ func (c *smClient) findSecretByFuzzy(ctx context.Context, query string) string {
 		// Find the entry with this name
 		for _, e := range entries {
 			if e.key == auto.name {
-				return e.id
+				return e.id, nil
 			}
 		}
 	}
-	return ""
+	return "", nil
+}
+
+// resolveSecretID resolves a key-or-ID to a secret ID. If keyOrID looks like
+// a UUID, it tries a direct GET first; if that 404s (or it isn't a UUID), it
+// falls through to exact-key match, then fuzzy match. When projectName is
+// non-empty, only secrets in that project are considered.
+//
+// Note: when a UUID is provided and the lookup succeeds, projectName is
+// ignored (the exact ID is unambiguous). A warning is printed to stderr
+// when both are given.
+func (c *smClient) resolveSecretID(ctx context.Context, keyOrID, projectName string) (string, error) {
+	// Try to parse as UUID
+	if _, err := uuid.Parse(keyOrID); err == nil {
+		// Check if it's a valid secret ID
+		url := fmt.Sprintf("%s/secrets/%s", apiURL, keyOrID)
+		var scratch smSecretResponse
+		if fetchErr := jsonGETWithToken(ctx, url, c.apiToken, &scratch); fetchErr == nil {
+			if projectName != "" {
+				fmt.Fprintf(os.Stderr, "warning: --project %q is ignored when using a secret ID (UUID)\n", projectName)
+			}
+			return keyOrID, nil
+		} else if errsc, ok := fetchErr.(*errStatusCode); !ok || errsc.code != 404 {
+			return "", smError(fetchErr, "get secret")
+		}
+		// 404 — fall through to key/fuzzy search
+	}
+
+	// Try exact key match
+	secretID, err := c.findSecretByKey(ctx, keyOrID, projectName)
+	if err != nil {
+		return "", err
+	}
+	if secretID == "" {
+		// Try fuzzy match
+		secretID, err = c.findSecretByFuzzy(ctx, keyOrID, projectName)
+		if err != nil {
+			return "", err
+		}
+		if secretID == "" {
+			return "", fmt.Errorf("secret %q not found", keyOrID)
+		}
+	}
+	return secretID, nil
+}
+
+// fetchSecret fetches a secret by its ID and returns the raw response.
+// The caller must decrypt the Key, Value, and Note fields.
+func (c *smClient) fetchSecret(ctx context.Context, secretID string) (*smSecretResponse, error) {
+	url := fmt.Sprintf("%s/secrets/%s", apiURL, secretID)
+	var resp smSecretResponse
+	if err := jsonGETWithToken(ctx, url, c.apiToken, &resp); err != nil {
+		return nil, smError(err, "get secret")
+	}
+	return &resp, nil
 }
 
 // smError converts HTTP errors to user-friendly messages.
+// isListOp indicates whether the error comes from a list endpoint (affects 404 wording).
 func smError(err error, context string) error {
+	return smErrorKind(err, context, false)
+}
+
+// smListError is like smError but for list endpoints — a 404 means the org
+// is wrong/deleted rather than a specific resource being missing.
+func smListError(err error, context string) error {
+	return smErrorKind(err, context, true)
+}
+
+func smErrorKind(err error, context string, isList bool) error {
 	if errsc, ok := err.(*errStatusCode); ok {
 		switch errsc.code {
 		case 401, 403:
 			return fmt.Errorf("SM authentication failed (%d): %s", errsc.code, string(errsc.body))
 		case 404:
-			// For list endpoints, include context so a 404 on the
-			// wrong/deleted org is not confused with a missing secret.
-			if strings.Contains(context, "list") {
+			if isList {
 				return fmt.Errorf("%s: not found", context)
 			}
 			return fmt.Errorf("secret not found")
@@ -504,15 +605,32 @@ type smCreateResponse struct {
 	RevisionDate   string `json:"revisionDate"`
 }
 
-// smCreate creates a new secret in the organization.
-func (c *smClient) smCreate(ctx context.Context, key, value string) error {
-	url := fmt.Sprintf("%s/secrets", apiURL)
+// smCreate creates a new secret in the organization. If projectID is non-empty,
+// the secret is associated with that project. All fields are encrypted with
+// the org key before transmission (zero-knowledge wire format).
+func (c *smClient) smCreate(ctx context.Context, key, value, projectID string) error {
+	encKey, err := c.encryptSMField(key)
+	if err != nil {
+		return err
+	}
+	encValue, err := c.encryptSMField(value)
+	if err != nil {
+		return err
+	}
+	encNote, err := c.encryptSMField("")
+	if err != nil {
+		return err
+	}
 
+	url := fmt.Sprintf("%s/secrets", apiURL)
 	body := map[string]interface{}{
 		"organizationId": c.orgID,
-		"key":            key,
-		"value":          value,
-		"note":           "",
+		"key":            encKey,
+		"value":          encValue,
+		"note":           encNote,
+	}
+	if projectID != "" {
+		body["projectIds"] = []string{projectID}
 	}
 
 	var resp smCreateResponse
@@ -527,29 +645,123 @@ func (c *smClient) smCreate(ctx context.Context, key, value string) error {
 
 // smCreateValue creates a new secret, reading the value from the provided reader.
 // This is a testable helper that separates stdin reading from the create logic.
-func (c *smClient) smCreateValue(ctx context.Context, key string, valueReader io.Reader) error {
+func (c *smClient) smCreateValue(ctx context.Context, key string, valueReader io.Reader, projectID string) error {
 	data, err := io.ReadAll(valueReader)
 	if err != nil {
 		return fmt.Errorf("failed to read value: %w", err)
 	}
-	return c.smCreate(ctx, key, string(data))
+	return c.smCreate(ctx, key, string(data), projectID)
+}
+
+// smEdit updates an existing secret by ID. It fetches the current secret,
+// decrypts its fields, merges with the caller's changes (empty = keep current),
+// encrypts all fields with the org key, and PUTs the result to /secrets/{id}.
+// Project membership is preserved from the fetched secret.
+func (c *smClient) smEdit(ctx context.Context, secretID, newKey, newValue, newNote string) error {
+	// Fetch current secret to merge unchanged fields
+	resp, err := c.fetchSecret(ctx, secretID)
+	if err != nil {
+		return err
+	}
+
+	// Decrypt current values
+	curKey, err := c.decryptSMField(resp.Key)
+	if err != nil {
+		return fmt.Errorf("could not decrypt secret key: %w", err)
+	}
+	curValue, err := c.decryptSMField(resp.Value)
+	if err != nil {
+		return fmt.Errorf("could not decrypt secret value: %w", err)
+	}
+	curNote, err := c.decryptSMField(resp.Note)
+	if err != nil {
+		return fmt.Errorf("could not decrypt secret note: %w", err)
+	}
+
+	// Merge: keep current value when caller provides an empty string.
+	if newKey == "" {
+		newKey = curKey
+	}
+	if newValue == "" {
+		newValue = curValue
+	}
+	if newNote == "" {
+		newNote = curNote
+	}
+
+	// Encrypt all fields with the org key
+	encKey, err := c.encryptSMField(newKey)
+	if err != nil {
+		return err
+	}
+	encValue, err := c.encryptSMField(newValue)
+	if err != nil {
+		return err
+	}
+	encNote, err := c.encryptSMField(newNote)
+	if err != nil {
+		return err
+	}
+
+	url := fmt.Sprintf("%s/secrets/%s", apiURL, secretID)
+	body := map[string]interface{}{
+		"key":   encKey,
+		"value": encValue,
+		"note":  encNote,
+	}
+
+	// Preserve project membership from the fetched secret
+	if len(resp.Projects) > 0 {
+		projIDs := make([]string, len(resp.Projects))
+		for i, p := range resp.Projects {
+			projIDs[i] = p.ID
+		}
+		body["projectIds"] = projIDs
+	}
+
+	var updateResp smCreateResponse
+	if err := jsonPUTWithToken(ctx, url, c.apiToken, &updateResp, body); err != nil {
+		return smError(err, "update secret")
+	}
+
+	fmt.Printf("%s\t%s\n", updateResp.ID, updateResp.Key)
+	return nil
 }
 
 // cmdSM is the entry point for `bitw sm` commands.
 func cmdSM(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: bitw sm <list|get|create> [args]")
+		return fmt.Errorf("usage: bitw sm <list|get|create|edit> [args]")
 	}
 
 	// Check args early to avoid unnecessary token validation/network calls.
 	switch args[0] {
 	case "get":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: bitw sm get <key-or-id>")
+			return fmt.Errorf("usage: bitw sm get <key-or-id> [--project NAME]")
 		}
 	case "create":
-		if len(args) < 3 {
-			return fmt.Errorf("usage: bitw sm create <key> <value> or bitw sm create <key> --stdin")
+		if len(args) < 2 {
+			return fmt.Errorf("usage: bitw sm create <key> [value | --stdin] [--project NAME]")
+		}
+		// Quick scan for at least a key arg or --stdin (the value check
+		// happens during flag parse below).
+	case "edit":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: bitw sm edit <key-or-id> [--key KEY] [--value VAL | --stdin] [--note NOTE] [--project NAME]")
+		}
+		// Quick scan for at least one modifier flag before any I/O.
+		hasModifier := false
+		for _, a := range args[1:] {
+			if a == "--key" || a == "--value" || a == "--stdin" || a == "--note" ||
+				strings.HasPrefix(a, "--key=") || strings.HasPrefix(a, "--value=") ||
+				strings.HasPrefix(a, "--note=") {
+				hasModifier = true
+				break
+			}
+		}
+		if !hasModifier {
+			return fmt.Errorf("at least one of --key, --value, --stdin, or --note is required")
 		}
 	}
 
@@ -568,13 +780,98 @@ func cmdSM(ctx context.Context, args []string) error {
 	case "list":
 		return client.smList(ctx)
 	case "get":
-		return client.smGet(ctx, args[1])
-	case "create":
-		if args[2] == "--stdin" {
-			return client.smCreateValue(ctx, args[1], os.Stdin)
+		fs := flag.NewFlagSet("get", flag.ContinueOnError)
+		var getProject string
+		fs.StringVar(&getProject, "project", "", "filter by project name")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
 		}
-		return client.smCreate(ctx, args[1], args[2])
+		nonFlag := fs.Args()
+		if len(nonFlag) < 1 {
+			return fmt.Errorf("usage: bitw sm get <key-or-id> [--project NAME]")
+		}
+		return client.smGet(ctx, nonFlag[0], getProject)
+	case "create":
+		fs := flag.NewFlagSet("create", flag.ContinueOnError)
+		var createProjectName string
+		var createStdin bool
+		fs.BoolVar(&createStdin, "stdin", false, "read value from stdin")
+		fs.StringVar(&createProjectName, "project", "", "project to associate the secret with")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		nonFlag := fs.Args()
+		if len(nonFlag) < 1 {
+			return fmt.Errorf("usage: bitw sm create <key> [value | --stdin] [--project NAME]")
+		}
+		createKey := nonFlag[0]
+
+		// --stdin and a positional value are contradictory.
+		if createStdin && len(nonFlag) > 1 {
+			return fmt.Errorf("cannot specify both a value argument and --stdin")
+		}
+
+		// Resolve project name to ID if specified
+		var createProjectID string
+		if createProjectName != "" {
+			var err error
+			createProjectID, err = client.resolveProjectID(ctx, createProjectName)
+			if err != nil {
+				return err
+			}
+		}
+
+		if createStdin {
+			return client.smCreateValue(ctx, createKey, os.Stdin, createProjectID)
+		}
+
+		if len(nonFlag) < 2 {
+			return fmt.Errorf("usage: bitw sm create <key> <value> or bitw sm create <key> --stdin [--project NAME]")
+		}
+		return client.smCreate(ctx, createKey, nonFlag[1], createProjectID)
+	case "edit":
+		// Parse flags for edit subcommand. We use flag.FlagSet so the
+		// args after the subcommand name can be parsed independently.
+		fs := flag.NewFlagSet("edit", flag.ContinueOnError)
+		var editKey, editValue, editNote, editProject string
+		var editStdin bool
+		fs.StringVar(&editKey, "key", "", "new key/name for the secret")
+		fs.StringVar(&editValue, "value", "", "new value for the secret")
+		fs.StringVar(&editNote, "note", "", "new note for the secret")
+		fs.StringVar(&editProject, "project", "", "filter by project name")
+		fs.BoolVar(&editStdin, "stdin", false, "read new value from stdin")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+
+		// Resolve the secret ID from the remaining positional arg (the
+		// key-or-id). After Parse, the first non-flag arg is the target.
+		nonFlag := fs.Args()
+		var keyOrID string
+		if len(nonFlag) > 0 {
+			keyOrID = nonFlag[0]
+		}
+		if keyOrID == "" {
+			// Should not happen because args check above requires >= 2.
+			return fmt.Errorf("usage: bitw sm edit <key-or-id> [--key KEY] [--value VAL | --stdin] [--note NOTE] [--project NAME]")
+		}
+
+		secretID, err := client.resolveSecretID(ctx, keyOrID, editProject)
+		if err != nil {
+			return err
+		}
+
+		// If --stdin, read value from stdin
+		if editStdin {
+			data, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				return fmt.Errorf("failed to read value from stdin: %w", err)
+			}
+			editValue = string(data)
+		}
+
+		return client.smEdit(ctx, secretID, editKey, editValue, editNote)
 	default:
-		return fmt.Errorf("unknown sm command: %q (use list, get, or create)", args[0])
+		return fmt.Errorf("unknown sm command: %q (use list, get, create, or edit)", args[0])
 	}
 }

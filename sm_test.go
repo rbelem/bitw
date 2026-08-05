@@ -25,6 +25,21 @@ func makeTestJWT(claims map[string]interface{}) string {
 	return "header." + payloadB64 + ".signature"
 }
 
+// decryptSMAttr decrypts an encrypted SM field string using the org key.
+// Used in tests to verify encrypted wire format.
+func decryptSMAttr(t *testing.T, orgKey []byte, encStr string) string {
+	t.Helper()
+	var cs CipherString
+	if err := cs.UnmarshalText([]byte(encStr)); err != nil {
+		t.Fatalf("unmarshal cipher string: %v", err)
+	}
+	dec, err := decryptWith(cs, orgKey[:32], orgKey[32:])
+	if err != nil {
+		t.Fatalf("decrypt: %v", err)
+	}
+	return string(dec)
+}
+
 // TestSM_KAT is the mandatory Known Answer Test for SM crypto derivation.
 // Uses the real Bitwarden fixture from sdk-internal client_secrets.rs.
 func TestSM_KAT(t *testing.T) {
@@ -367,7 +382,7 @@ func TestSM_GetByID(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err = client.smGet(context.Background(), kat.SecretID)
+	err = client.smGet(context.Background(), kat.SecretID, "")
 	qt.Assert(t, err, qt.IsNil)
 
 	_ = w.Close()
@@ -441,7 +456,7 @@ func TestSM_GetByKey(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err = client.smGet(context.Background(), "TEST")
+	err = client.smGet(context.Background(), "TEST", "")
 	qt.Assert(t, err, qt.IsNil)
 
 	_ = w.Close()
@@ -516,7 +531,7 @@ func TestSM_GetFuzzy(t *testing.T) {
 	os.Stdout = w
 
 	// "TES" should fuzzy match "TEST"
-	err = client.smGet(context.Background(), "TES")
+	err = client.smGet(context.Background(), "TES", "")
 	qt.Assert(t, err, qt.IsNil)
 
 	_ = w.Close()
@@ -571,7 +586,7 @@ func TestSM_GetNotFound(t *testing.T) {
 	client, err := newSMClient(context.Background(), kat.AccessToken)
 	qt.Assert(t, err, qt.IsNil)
 
-	err = client.smGet(context.Background(), "NONEXISTENT")
+	err = client.smGet(context.Background(), "NONEXISTENT", "")
 	qt.Assert(t, err, qt.IsNotNil)
 	qt.Assert(t, err.Error(), qt.Contains, "not found")
 }
@@ -596,9 +611,9 @@ func TestSM_ErrorPaths(t *testing.T) {
 		{
 			name:       "404 not found",
 			statusCode: 404,
-			// The UUID fetch 404s and falls through to key search, which
-			// also 404s — the final message names the queried secret.
-			wantErr: `secret "15744a66-341a-4c62-af50-af960166b6bc" not found`,
+			// The UUID fetch 404s and falls through to findSecretByKey,
+			// which returns the raw errStatusCode from the list call.
+			wantErr: "Not Found",
 		},
 	}
 
@@ -641,7 +656,7 @@ func TestSM_ErrorPaths(t *testing.T) {
 			client, err := newSMClient(context.Background(), kat.AccessToken)
 			qt.Assert(t, err, qt.IsNil)
 
-			err = client.smGet(context.Background(), "15744a66-341a-4c62-af50-af960166b6bc")
+			err = client.smGet(context.Background(), "15744a66-341a-4c62-af50-af960166b6bc", "")
 			qt.Assert(t, err, qt.IsNotNil)
 			qt.Assert(t, err.Error(), qt.Contains, tc.wantErr)
 		})
@@ -829,7 +844,7 @@ func TestSM_AmbiguousKey(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err = client.smGet(context.Background(), "TEST")
+	err = client.smGet(context.Background(), "TEST", "")
 
 	_ = w.Close()
 	os.Stdout = oldStdout
@@ -1007,7 +1022,7 @@ func TestSM_UUIDKeyFallback(t *testing.T) {
 	os.Stdout = w
 
 	// Use the UUID as the key — should fall through to key search
-	err = client.smGet(context.Background(), uuidKey)
+	err = client.smGet(context.Background(), uuidKey, "")
 	qt.Assert(t, err, qt.IsNil)
 
 	_ = w.Close()
@@ -1130,7 +1145,7 @@ func TestSM_CreateRequestShape(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err = client.smCreate(context.Background(), "test-key", "test-value")
+	err = client.smCreate(context.Background(), "test-key", "test-value", "")
 	qt.Assert(t, err, qt.IsNil)
 
 	_ = w.Close()
@@ -1142,8 +1157,8 @@ func TestSM_CreateRequestShape(t *testing.T) {
 
 	// Verify request body
 	qt.Assert(t, receivedBody["organizationId"], qt.Equals, "f4e44a7f-1190-432a-9d4a-af96013127cb")
-	qt.Assert(t, receivedBody["key"], qt.Equals, "test-key")
-	qt.Assert(t, receivedBody["value"], qt.Equals, "test-value")
+	qt.Assert(t, decryptSMAttr(t, client.orgKey, receivedBody["key"].(string)), qt.Equals, "test-key")
+	qt.Assert(t, decryptSMAttr(t, client.orgKey, receivedBody["value"].(string)), qt.Equals, "test-value")
 	qt.Assert(t, receivedBody["note"], qt.Equals, "")
 
 	// Verify Authorization header
@@ -1169,16 +1184,9 @@ func TestSM_CreateMissingArgs(t *testing.T) {
 		}
 	})
 
-	// Set a dummy token (args are checked before token validation)
+	// No args after "create" — caught by early check before token validation.
 	_ = os.Setenv("SM_ACCESS_TOKEN", "dummy")
-
-	// No args after "create"
 	err := cmdSM(context.Background(), []string{"create"})
-	qt.Assert(t, err, qt.IsNotNil)
-	qt.Assert(t, err.Error(), qt.Contains, "usage: bitw sm create")
-
-	// Only one arg after "create"
-	err = cmdSM(context.Background(), []string{"create", "key-only"})
 	qt.Assert(t, err, qt.IsNotNil)
 	qt.Assert(t, err.Error(), qt.Contains, "usage: bitw sm create")
 }
@@ -1264,7 +1272,7 @@ func TestSM_CreateValueFromReader(t *testing.T) {
 
 	// Test with a multi-line value injected via strings.Reader
 	multiLineValue := "line1\nline2\nline3"
-	err = client.smCreateValue(context.Background(), "test-key", strings.NewReader(multiLineValue))
+	err = client.smCreateValue(context.Background(), "test-key", strings.NewReader(multiLineValue), "")
 	qt.Assert(t, err, qt.IsNil)
 
 	_ = w.Close()
@@ -1275,7 +1283,388 @@ func TestSM_CreateValueFromReader(t *testing.T) {
 	output := string(buf[:n])
 
 	// Verify the multi-line value was preserved exactly
-	qt.Assert(t, receivedBody["value"], qt.Equals, multiLineValue)
-	qt.Assert(t, receivedBody["key"], qt.Equals, "test-key")
+	qt.Assert(t, decryptSMAttr(t, client.orgKey, receivedBody["value"].(string)), qt.Equals, multiLineValue)
+	qt.Assert(t, decryptSMAttr(t, client.orgKey, receivedBody["key"].(string)), qt.Equals, "test-key")
 	qt.Assert(t, output, qt.Equals, "new-secret-id\tencrypted-key\n")
+}
+
+// TestSM_EditRequestShape verifies the PUT /secrets/{id} request format.
+func TestSM_EditRequestShape(t *testing.T) {
+	data, err := os.ReadFile("testdata/sm-kat.json")
+	qt.Assert(t, err, qt.IsNil)
+
+	var kat struct {
+		AccessToken      string `json:"access_token"`
+		EncryptedPayload string `json:"encrypted_payload"`
+		SecretID         string `json:"secret_id"`
+		SecretKey        string `json:"secret_key"`
+		SecretValue      string `json:"secret_value"`
+		SecretNote       string `json:"secret_note"`
+	}
+	qt.Assert(t, json.Unmarshal(data, &kat), qt.IsNil)
+
+	var receivedBody map[string]interface{}
+	var receivedAuth string
+	var receivedMethod string
+	var gotCurrent bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/connect/token" {
+			_ = json.NewEncoder(w).Encode(smTokenExchangeResponse{
+				AccessToken: makeTestJWT(map[string]interface{}{
+					"organization": "f4e44a7f-1190-432a-9d4a-af96013127cb",
+				}),
+				ExpiresIn:        3600,
+				TokenType:        "Bearer",
+				EncryptedPayload: kat.EncryptedPayload,
+			})
+		} else if r.URL.Path == "/secrets/"+kat.SecretID && r.Method == "GET" {
+			gotCurrent = true
+			_ = json.NewEncoder(w).Encode(smSecretResponse{
+				ID:    kat.SecretID,
+				Key:   kat.SecretKey,
+				Value: kat.SecretValue,
+				Note:  kat.SecretNote,
+			})
+		} else if r.URL.Path == "/secrets/"+kat.SecretID && r.Method == "PUT" {
+			receivedMethod = r.Method
+			receivedAuth = r.Header.Get("Authorization")
+			_ = json.NewDecoder(r.Body).Decode(&receivedBody)
+			_ = json.NewEncoder(w).Encode(smCreateResponse{
+				ID:             kat.SecretID,
+				OrganizationID: "f4e44a7f-1190-432a-9d4a-af96013127cb",
+				Key:            "encrypted-updated-key",
+			})
+		}
+	}))
+	defer server.Close()
+
+	origApiURL := apiURL
+	origIdtURL := idtURL
+	apiURL = server.URL
+	idtURL = server.URL
+	defer func() {
+		apiURL = origApiURL
+		idtURL = origIdtURL
+	}()
+
+	client, err := newSMClient(context.Background(), kat.AccessToken)
+	qt.Assert(t, err, qt.IsNil)
+
+	// Capture stdout
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err = client.smEdit(context.Background(), kat.SecretID, "new-key", "new-value", "new-note")
+	qt.Assert(t, err, qt.IsNil)
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	buf := make([]byte, 1024)
+	n, _ := r.Read(buf)
+	output := string(buf[:n])
+
+	// Must have fetched the current secret first
+	qt.Assert(t, gotCurrent, qt.Equals, true)
+
+	// Verify PUT body contains encrypted fields (decrypt to verify)
+	qt.Assert(t, decryptSMAttr(t, client.orgKey, receivedBody["key"].(string)), qt.Equals, "new-key")
+	qt.Assert(t, decryptSMAttr(t, client.orgKey, receivedBody["value"].(string)), qt.Equals, "new-value")
+	qt.Assert(t, decryptSMAttr(t, client.orgKey, receivedBody["note"].(string)), qt.Equals, "new-note")
+	// No projects in the mock secret response → projectIds should be absent
+	qt.Assert(t, receivedBody["projectIds"], qt.IsNil)
+
+	// Verify Authorization header
+	qt.Assert(t, receivedAuth, qt.Contains, "Bearer ")
+
+	// Verify HTTP method
+	qt.Assert(t, receivedMethod, qt.Equals, "PUT")
+
+	// Verify output is TSV: id\tkey
+	qt.Assert(t, output, qt.Equals, kat.SecretID+"\tencrypted-updated-key\n")
+}
+
+// TestSM_EditPartialUpdate verifies that empty strings fall back to current values.
+func TestSM_EditPartialUpdate(t *testing.T) {
+	data, err := os.ReadFile("testdata/sm-kat.json")
+	qt.Assert(t, err, qt.IsNil)
+
+	var kat struct {
+		AccessToken      string `json:"access_token"`
+		EncryptedPayload string `json:"encrypted_payload"`
+		SecretID         string `json:"secret_id"`
+		SecretKey        string `json:"secret_key"`
+		SecretValue      string `json:"secret_value"`
+		SecretNote       string `json:"secret_note"`
+	}
+	qt.Assert(t, json.Unmarshal(data, &kat), qt.IsNil)
+
+	var receivedBody map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/connect/token" {
+			_ = json.NewEncoder(w).Encode(smTokenExchangeResponse{
+				AccessToken: makeTestJWT(map[string]interface{}{
+					"organization": "f4e44a7f-1190-432a-9d4a-af96013127cb",
+				}),
+				ExpiresIn:        3600,
+				TokenType:        "Bearer",
+				EncryptedPayload: kat.EncryptedPayload,
+			})
+		} else if r.URL.Path == "/secrets/"+kat.SecretID && r.Method == "GET" {
+			_ = json.NewEncoder(w).Encode(smSecretResponse{
+				ID:    kat.SecretID,
+				Key:   kat.SecretKey,
+				Value: kat.SecretValue,
+				Note:  kat.SecretNote,
+			})
+		} else if r.URL.Path == "/secrets/"+kat.SecretID && r.Method == "PUT" {
+			_ = json.NewDecoder(r.Body).Decode(&receivedBody)
+			_ = json.NewEncoder(w).Encode(smCreateResponse{
+				ID: kat.SecretID,
+			})
+		}
+	}))
+	defer server.Close()
+
+	origApiURL := apiURL
+	origIdtURL := idtURL
+	apiURL = server.URL
+	idtURL = server.URL
+	defer func() {
+		apiURL = origApiURL
+		idtURL = origIdtURL
+	}()
+
+	client, err := newSMClient(context.Background(), kat.AccessToken)
+	qt.Assert(t, err, qt.IsNil)
+
+	// Only update the key — value and note should keep current decrypted value ("TEST")
+	err = client.smEdit(context.Background(), kat.SecretID, "updated-key", "", "")
+	qt.Assert(t, err, qt.IsNil)
+
+	// Key should be the new (encrypted then decrypted) value
+	qt.Assert(t, decryptSMAttr(t, client.orgKey, receivedBody["key"].(string)), qt.Equals, "updated-key")
+	// Value and note should be the current decrypted value ("TEST")
+	qt.Assert(t, decryptSMAttr(t, client.orgKey, receivedBody["value"].(string)), qt.Equals, "TEST")
+	qt.Assert(t, decryptSMAttr(t, client.orgKey, receivedBody["note"].(string)), qt.Equals, "TEST")
+}
+
+// TestSM_EditStdin verifies that the --stdin path reads from the injected reader.
+func TestSM_EditStdin(t *testing.T) {
+	data, err := os.ReadFile("testdata/sm-kat.json")
+	qt.Assert(t, err, qt.IsNil)
+
+	var kat struct {
+		AccessToken      string `json:"access_token"`
+		EncryptedPayload string `json:"encrypted_payload"`
+		SecretID         string `json:"secret_id"`
+		SecretKey        string `json:"secret_key"`
+		SecretValue      string `json:"secret_value"`
+		SecretNote       string `json:"secret_note"`
+	}
+	qt.Assert(t, json.Unmarshal(data, &kat), qt.IsNil)
+
+	var receivedBody map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/connect/token" {
+			_ = json.NewEncoder(w).Encode(smTokenExchangeResponse{
+				AccessToken: makeTestJWT(map[string]interface{}{
+					"organization": "f4e44a7f-1190-432a-9d4a-af96013127cb",
+				}),
+				ExpiresIn:        3600,
+				TokenType:        "Bearer",
+				EncryptedPayload: kat.EncryptedPayload,
+			})
+		} else if r.URL.Path == "/secrets/"+kat.SecretID && r.Method == "GET" {
+			_ = json.NewEncoder(w).Encode(smSecretResponse{
+				ID:    kat.SecretID,
+				Key:   kat.SecretKey,
+				Value: kat.SecretValue,
+				Note:  kat.SecretNote,
+			})
+		} else if r.URL.Path == "/secrets/"+kat.SecretID && r.Method == "PUT" {
+			_ = json.NewDecoder(r.Body).Decode(&receivedBody)
+			_ = json.NewEncoder(w).Encode(smCreateResponse{
+				ID: kat.SecretID,
+			})
+		}
+	}))
+	defer server.Close()
+
+	origApiURL := apiURL
+	origIdtURL := idtURL
+	apiURL = server.URL
+	idtURL = server.URL
+	defer func() {
+		apiURL = origApiURL
+		idtURL = origIdtURL
+	}()
+
+	client, err := newSMClient(context.Background(), kat.AccessToken)
+	qt.Assert(t, err, qt.IsNil)
+
+	// Simulate --stdin by reading from a strings.Reader directly
+	stdinValue := "stdin-value\n"
+	err = client.smEdit(context.Background(), kat.SecretID, "", stdinValue, "")
+	qt.Assert(t, err, qt.IsNil)
+
+	// Verify the value from the injected reader was used
+	qt.Assert(t, decryptSMAttr(t, client.orgKey, receivedBody["value"].(string)), qt.Equals, "stdin-value\n")
+}
+
+// TestSM_EditMissingArgs tests that missing args produce an error.
+func TestSM_EditMissingArgs(t *testing.T) {
+	origSecrets := secrets
+	t.Cleanup(func() {
+		secrets = origSecrets
+	})
+
+	origEnv := os.Getenv("SM_ACCESS_TOKEN")
+	t.Cleanup(func() {
+		if origEnv != "" {
+			_ = os.Setenv("SM_ACCESS_TOKEN", origEnv)
+		} else {
+			_ = os.Unsetenv("SM_ACCESS_TOKEN")
+		}
+	})
+
+	// Set a dummy token (args are checked before token validation)
+	_ = os.Setenv("SM_ACCESS_TOKEN", "dummy")
+
+	// No args after "edit"
+	err := cmdSM(context.Background(), []string{"edit"})
+	qt.Assert(t, err, qt.IsNotNil)
+	qt.Assert(t, err.Error(), qt.Contains, "usage: bitw sm edit")
+	qt.Assert(t, err.Error(), qt.Contains, "--key")
+	qt.Assert(t, err.Error(), qt.Contains, "--value")
+}
+
+// TestSM_EditRequiresModifier tests that edit without any modifier flag fails.
+func TestSM_EditRequiresModifier(t *testing.T) {
+	origSecrets := secrets
+	t.Cleanup(func() {
+		secrets = origSecrets
+	})
+
+	origEnv := os.Getenv("SM_ACCESS_TOKEN")
+	t.Cleanup(func() {
+		if origEnv != "" {
+			_ = os.Setenv("SM_ACCESS_TOKEN", origEnv)
+		} else {
+			_ = os.Unsetenv("SM_ACCESS_TOKEN")
+		}
+	})
+
+	_ = os.Setenv("SM_ACCESS_TOKEN", "dummy")
+
+	err := cmdSM(context.Background(), []string{"edit", "some-secret"})
+	qt.Assert(t, err, qt.IsNotNil)
+	qt.Assert(t, err.Error(), qt.Contains, "at least one of")
+	qt.Assert(t, err.Error(), qt.Contains, "--key")
+	qt.Assert(t, err.Error(), qt.Contains, "--stdin")
+}
+
+// TestSM_EditNotFound tests error for editing a nonexistent secret.
+func TestSM_EditNotFound(t *testing.T) {
+	data, err := os.ReadFile("testdata/sm-kat.json")
+	qt.Assert(t, err, qt.IsNil)
+
+	var kat struct {
+		AccessToken      string `json:"access_token"`
+		EncryptedPayload string `json:"encrypted_payload"`
+	}
+	qt.Assert(t, json.Unmarshal(data, &kat), qt.IsNil)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/connect/token" {
+			_ = json.NewEncoder(w).Encode(smTokenExchangeResponse{
+				AccessToken: makeTestJWT(map[string]interface{}{
+					"organization": "f4e44a7f-1190-432a-9d4a-af96013127cb",
+				}),
+				ExpiresIn:        3600,
+				TokenType:        "Bearer",
+				EncryptedPayload: kat.EncryptedPayload,
+			})
+		} else if strings.HasSuffix(r.URL.Path, "/secrets") {
+			resp := smListResponse{
+				Secrets: []smListSecret{},
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+		} else if strings.Contains(r.URL.Path, "/secrets/") {
+			http.Error(w, "not found", 404)
+		}
+	}))
+	defer server.Close()
+
+	origApiURL := apiURL
+	origIdtURL := idtURL
+	apiURL = server.URL
+	idtURL = server.URL
+	defer func() {
+		apiURL = origApiURL
+		idtURL = origIdtURL
+	}()
+
+	client, err := newSMClient(context.Background(), kat.AccessToken)
+	qt.Assert(t, err, qt.IsNil)
+
+	err = client.smEdit(context.Background(), "NONEXISTENT", "new-key", "", "")
+	qt.Assert(t, err, qt.IsNotNil)
+	qt.Assert(t, err.Error(), qt.Contains, "not found")
+}
+
+// TestSM_EditUpdateError tests HTTP error handling during PUT.
+func TestSM_EditUpdateError(t *testing.T) {
+	data, err := os.ReadFile("testdata/sm-kat.json")
+	qt.Assert(t, err, qt.IsNil)
+
+	var kat struct {
+		AccessToken      string `json:"access_token"`
+		EncryptedPayload string `json:"encrypted_payload"`
+		SecretID         string `json:"secret_id"`
+		SecretKey        string `json:"secret_key"`
+		SecretValue      string `json:"secret_value"`
+		SecretNote       string `json:"secret_note"`
+	}
+	qt.Assert(t, json.Unmarshal(data, &kat), qt.IsNil)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/connect/token" {
+			_ = json.NewEncoder(w).Encode(smTokenExchangeResponse{
+				AccessToken: makeTestJWT(map[string]interface{}{
+					"organization": "f4e44a7f-1190-432a-9d4a-af96013127cb",
+				}),
+				ExpiresIn:        3600,
+				TokenType:        "Bearer",
+				EncryptedPayload: kat.EncryptedPayload,
+			})
+		} else if r.URL.Path == "/secrets/"+kat.SecretID && r.Method == "GET" {
+			_ = json.NewEncoder(w).Encode(smSecretResponse{
+				ID:    kat.SecretID,
+				Key:   kat.SecretKey,
+				Value: kat.SecretValue,
+				Note:  kat.SecretNote,
+			})
+		} else if r.URL.Path == "/secrets/"+kat.SecretID && r.Method == "PUT" {
+			http.Error(w, "forbidden", http.StatusForbidden)
+		}
+	}))
+	defer server.Close()
+
+	origApiURL := apiURL
+	origIdtURL := idtURL
+	apiURL = server.URL
+	idtURL = server.URL
+	defer func() {
+		apiURL = origApiURL
+		idtURL = origIdtURL
+	}()
+
+	client, err := newSMClient(context.Background(), kat.AccessToken)
+	qt.Assert(t, err, qt.IsNil)
+
+	err = client.smEdit(context.Background(), kat.SecretID, "new-key", "", "")
+	qt.Assert(t, err, qt.IsNotNil)
+	qt.Assert(t, err.Error(), qt.Contains, "SM authentication failed (403)")
 }
