@@ -400,14 +400,30 @@ func (c *smClient) secretInProject(s smListSecret, projectName string) bool {
 
 // resolveProjectID resolves a project name to its UUID by listing projects
 // from the organization and matching the name (decrypting defensively).
+// listProjects fetches all projects in the organization. The list-secrets
+// response's top-level projects array is only populated when secrets
+// reference them, so resolveProjectID must use this dedicated endpoint
+// (GET /organizations/{orgID}/projects) instead of listSecrets.
+func (c *smClient) listProjects(ctx context.Context) ([]smListProject, error) {
+	type projectsResponse struct {
+		Data []smListProject `json:"data"`
+	}
+	url := fmt.Sprintf("%s/organizations/%s/projects", apiURL, c.orgID)
+	var resp projectsResponse
+	if err := jsonGETWithToken(ctx, url, c.apiToken, &resp); err != nil {
+		return nil, smListError(err, "list projects")
+	}
+	return resp.Data, nil
+}
+
 func (c *smClient) resolveProjectID(ctx context.Context, projectName string) (string, error) {
-	resp, err := c.listSecrets(ctx)
+	projects, err := c.listProjects(ctx)
 	if err != nil {
-		return "", smListError(err, "list projects")
+		return "", err
 	}
 
 	var matched []smListProject
-	for _, p := range resp.Projects {
+	for _, p := range projects {
 		decName := c.decryptProjectName(p.Name)
 		if decName == projectName {
 			matched = append(matched, p)
