@@ -199,7 +199,7 @@ func (c *smClient) listSecrets(ctx context.Context) (*smListResponse, error) {
 	if c.listCache != nil {
 		return c.listCache, nil
 	}
-	url := fmt.Sprintf("%s/public/organizations/%s/secrets", apiURL, c.orgID)
+	url := fmt.Sprintf("%s/organizations/%s/secrets", apiURL, c.orgID)
 	var resp smListResponse
 	if err := jsonGETWithToken(ctx, url, c.apiToken, &resp); err != nil {
 		return nil, err
@@ -292,9 +292,9 @@ func (c *smClient) decryptSMField(encStr string) (string, error) {
 // encryptSMField encrypts a plaintext string with the org key and returns
 // a serialized CipherString suitable for the SM API wire format.
 func (c *smClient) encryptSMField(plain string) (string, error) {
-	if plain == "" {
-		return "", nil
-	}
+	// Always encrypt, even empty plaintext: the SM API requires all
+	// fields (key, value, note) to be valid EncStrings and rejects ""
+	// with "The Note field is required" / "not a valid encrypted string".
 	cs, err := encryptWith([]byte(plain), AesCbc256_HmacSha256_B64, c.orgKey[:32], c.orgKey[32:])
 	if err != nil {
 		return "", fmt.Errorf("could not encrypt field: %w", err)
@@ -515,7 +515,7 @@ func (c *smClient) resolveSecretID(ctx context.Context, keyOrID, projectName str
 	// Try to parse as UUID
 	if _, err := uuid.Parse(keyOrID); err == nil {
 		// Check if it's a valid secret ID
-		url := fmt.Sprintf("%s/public/secrets/%s", apiURL, keyOrID)
+		url := fmt.Sprintf("%s/secrets/%s", apiURL, keyOrID)
 		var scratch smSecretResponse
 		if fetchErr := jsonGETWithToken(ctx, url, c.apiToken, &scratch); fetchErr == nil {
 			if projectName != "" {
@@ -549,7 +549,7 @@ func (c *smClient) resolveSecretID(ctx context.Context, keyOrID, projectName str
 // fetchSecret fetches a secret by its ID and returns the raw response.
 // The caller must decrypt the Key, Value, and Note fields.
 func (c *smClient) fetchSecret(ctx context.Context, secretID string) (*smSecretResponse, error) {
-	url := fmt.Sprintf("%s/public/secrets/%s", apiURL, secretID)
+	url := fmt.Sprintf("%s/secrets/%s", apiURL, secretID)
 	var resp smSecretResponse
 	if err := jsonGETWithToken(ctx, url, c.apiToken, &resp); err != nil {
 		return nil, smError(err, "get secret")
@@ -577,6 +577,9 @@ func smErrorKind(err error, context string, isList bool) error {
 		case 404:
 			if isList {
 				return fmt.Errorf("%s: not found", context)
+			}
+			if len(errsc.body) > 0 {
+				return fmt.Errorf("secret not found: %s", string(errsc.body))
 			}
 			return fmt.Errorf("secret not found")
 		}
@@ -622,7 +625,7 @@ func (c *smClient) smCreate(ctx context.Context, key, value, projectID string) e
 		return err
 	}
 
-	url := fmt.Sprintf("%s/public/secrets", apiURL)
+	url := fmt.Sprintf("%s/organizations/%s/secrets", apiURL, c.orgID)
 	body := map[string]interface{}{
 		"organizationId": c.orgID,
 		"key":            encKey,
@@ -703,7 +706,7 @@ func (c *smClient) smEdit(ctx context.Context, secretID, newKey, newValue, newNo
 		return err
 	}
 
-	url := fmt.Sprintf("%s/public/secrets/%s", apiURL, secretID)
+	url := fmt.Sprintf("%s/secrets/%s", apiURL, secretID)
 	body := map[string]interface{}{
 		"key":   encKey,
 		"value": encValue,
