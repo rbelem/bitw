@@ -657,8 +657,9 @@ func (c *smClient) smCreate(ctx context.Context, key, value, projectID string) e
 		return smError(err, "create secret")
 	}
 
-	// Print TSV: id\tkey (matches list output style)
-	fmt.Printf("%s\t%s\n", resp.ID, resp.Key)
+	// Print TSV: id\tkey (matches list output style — decrypted key)
+	decKey, _ := c.decryptSMField(resp.Key)
+	fmt.Printf("%s\t%s\n", resp.ID, decKey)
 	return nil
 }
 
@@ -743,7 +744,9 @@ func (c *smClient) smEdit(ctx context.Context, secretID, newKey, newValue, newNo
 		return smError(err, "update secret")
 	}
 
-	fmt.Printf("%s\t%s\n", updateResp.ID, updateResp.Key)
+	// Print TSV: id\tkey (matches list output style — decrypted key)
+	decKey, _ := c.decryptSMField(updateResp.Key)
+	fmt.Printf("%s\t%s\n", updateResp.ID, decKey)
 	return nil
 }
 
