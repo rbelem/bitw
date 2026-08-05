@@ -125,6 +125,24 @@ func TestPicker_FilterNarrowing(t *testing.T) {
 	qt.Assert(t, m.handleKey(pickerKey{kind: kEnter}), qt.Equals, actSelect)
 }
 
+// TestPicker_FilterMatchesUsername verifies typing part of a login's username
+// filters to that item even when the name doesn't contain the query.
+func TestPicker_FilterMatchesUsername(t *testing.T) {
+	items := []pickerItem{
+		{name: "Prod Dashboard", username: "svc-flare"},
+		{name: "Other", username: "bob@example.com"},
+	}
+	m := &pickerModel{items: items}
+	m.recompute()
+	qt.Assert(t, len(m.rows), qt.Equals, 2)
+
+	for _, r := range "flare" {
+		m.handleKey(pickerKey{kind: kRune, r: r})
+	}
+	qt.Assert(t, len(m.rows), qt.Equals, 1)
+	qt.Assert(t, m.rows[0].item.name, qt.Equals, "Prod Dashboard")
+}
+
 // TestPicker_BackspaceAndCtrlU verifies filter editing.
 func TestPicker_BackspaceAndCtrlU(t *testing.T) {
 	items := []pickerItem{{name: "GitHub"}, {name: "Gmail"}}
@@ -277,6 +295,58 @@ func TestPickerRender_SelectedUsesReverseVideo(t *testing.T) {
 	qt.Assert(t, out, qt.Contains, "▶")
 }
 
+// TestPickerRender_UsernameShown verifies a login's username is rendered
+// (dimmed) after the name so rows disambiguate at a glance.
+func TestPickerRender_UsernameShown(t *testing.T) {
+	items := []pickerItem{{
+		name:     "Prod Dashboard",
+		username: "svc-flare",
+		typ:      CipherLogin,
+	}}
+	m := &pickerModel{items: items}
+	m.recompute()
+	var buf bytes.Buffer
+	renderPicker(&buf, m, 80, 24)
+	out := buf.String()
+	qt.Assert(t, ansiEscRe.ReplaceAllString(out, ""), qt.Contains, "Prod Dashboard svc-flare")
+	// The username sits in a dim run.
+	qt.Assert(t, out, qt.Contains, "\x1b[2msvc-flare\x1b[22m",
+		qt.Commentf("expected dim username after the name; got %q", out))
+}
+
+// TestPickerRender_UsernameMatchHighlighted verifies that when the filter
+// matches inside the username, the matched characters are emphasized the same
+// way name matches are (instead of staying dim).
+func TestPickerRender_UsernameMatchHighlighted(t *testing.T) {
+	items := []pickerItem{{
+		name:     "Prod Dashboard",
+		username: "svc-flare",
+		typ:      CipherLogin,
+	}}
+	m := &pickerModel{items: items}
+	m.filter = []rune("flare")
+	m.recompute()
+	var buf bytes.Buffer
+	renderPicker(&buf, m, 80, 24)
+	out := buf.String()
+	// The row is selected (only row), so the matched run is bold within the
+	// reverse-video selection, and the username is not dimmed.
+	qt.Assert(t, out, qt.Contains, "svc-\x1b[1mflare\x1b[22m",
+		qt.Commentf("expected bold username match in selected row; got %q", out))
+	qt.Assert(t, out, qt.Not(qt.Contains), "\x1b[2msvc-flare\x1b[22m")
+}
+
+// TestPickerRender_NoUsername_Unchanged verifies items without a username
+// render exactly as before (name only).
+func TestPickerRender_NoUsername_Unchanged(t *testing.T) {
+	items := []pickerItem{{name: "alpha"}}
+	m := &pickerModel{items: items}
+	m.recompute()
+	var buf bytes.Buffer
+	renderPicker(&buf, m, 80, 24)
+	qt.Assert(t, ansiEscRe.ReplaceAllString(buf.String(), ""), qt.Contains, "alpha")
+}
+
 // ---- cmdGet integration tests (picker seams overridden) -------------
 
 // TestCmdGet_NoArgs_NonTerminal verifies that `bitw get` with no args and no
@@ -416,6 +486,94 @@ func TestCmdGet_FuzzyFallback_PartialName(t *testing.T) {
 	})
 	qt.Assert(t, stderr, qt.Contains,
 		`warning: no exact match for "git", using "GitHub"`)
+}
+
+// TestCmdGet_FuzzyFallback_UsernameMatch verifies the fuzzy fallback also
+// matches on a login's username: a query found only in the username still
+// resolves the item, and the warning names the cipher (not the query).
+func TestCmdGet_FuzzyFallback_UsernameMatch(t *testing.T) {
+	setupVault(t)
+	globalData.Sync.Ciphers = []Cipher{{
+		Type: CipherLogin,
+		Name: encryptStr(t, "Prod Dashboard"),
+		Login: &Login{
+			Username: encryptStr(t, "svc-flare"),
+			Password: encryptStr(t, "flare-pw"),
+		},
+	}}
+
+	stderr := captureStderr(t, func() {
+		stdout := captureStdout(t, func() {
+			err := cmdGet(context.Background(), []string{"flare"})
+			qt.Assert(t, err, qt.IsNil)
+		})
+		qt.Assert(t, stdout, qt.Contains, "flare-pw")
+	})
+	qt.Assert(t, stderr, qt.Contains,
+		`warning: no exact match for "flare", using "Prod Dashboard"`)
+}
+
+// TestDecryptCipherList_UndecryptableUsernameWarns verifies that a login whose
+// username fails to decrypt still shows up in the picker list (name only),
+// with a stderr warning explaining the missing username.
+func TestDecryptCipherList_UndecryptableUsernameWarns(t *testing.T) {
+	setupVault(t)
+	globalData.Sync.Ciphers = []Cipher{{
+		Type: CipherLogin,
+		Name: encryptStr(t, "Prod Dashboard"),
+		Login: &Login{
+			Username: CipherString{
+				Type: AesCbc256_HmacSha256_B64,
+				IV:   make([]byte, 16),
+				CT:   make([]byte, 16),
+				MAC:  make([]byte, 32),
+			},
+			Password: encryptStr(t, "pw"),
+		},
+	}}
+
+	stderr := captureStderr(t, func() {
+		items := decryptCipherList()
+		qt.Assert(t, len(items), qt.Equals, 1)
+		qt.Assert(t, items[0].name, qt.Equals, "Prod Dashboard")
+		qt.Assert(t, items[0].username, qt.Equals, "")
+	})
+	qt.Assert(t, stderr, qt.Contains, "warning: could not decrypt username of cipher")
+}
+
+// TestCmdGet_FuzzyFallback_UsernameAmbiguity verifies that two logins with
+// the same name are disambiguated by username: the query matching only the
+// second one's username selects it, not the first.
+func TestCmdGet_FuzzyFallback_UsernameAmbiguity(t *testing.T) {
+	setupVault(t)
+	globalData.Sync.Ciphers = []Cipher{
+		{
+			Type: CipherLogin,
+			Name: encryptStr(t, "Prod Dashboard"),
+			Login: &Login{
+				Username: encryptStr(t, "alice@example.com"),
+				Password: encryptStr(t, "pw-alice"),
+			},
+		},
+		{
+			Type: CipherLogin,
+			Name: encryptStr(t, "Prod Dashboard"),
+			Login: &Login{
+				Username: encryptStr(t, "svc-flare"),
+				Password: encryptStr(t, "pw-flare"),
+			},
+		},
+	}
+
+	stderr := captureStderr(t, func() {
+		stdout := captureStdout(t, func() {
+			err := cmdGet(context.Background(), []string{"flare"})
+			qt.Assert(t, err, qt.IsNil)
+		})
+		qt.Assert(t, stdout, qt.Contains, "pw-flare")
+		qt.Assert(t, stdout, qt.Not(qt.Contains), "pw-alice")
+	})
+	qt.Assert(t, stderr, qt.Contains, `using "Prod Dashboard"`)
 }
 
 // TestCmdGet_FuzzyFallback_GarbageName verifies that a name with no fuzzy

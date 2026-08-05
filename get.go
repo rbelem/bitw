@@ -113,17 +113,28 @@ func cmdGet(ctx context.Context, args []string) error {
 			// No exact match. Rank fuzzy candidates and decide whether the
 			// top match is confident enough to auto-select, ambiguous, or too
 			// weak — see autoSelectCandidate and fuzzyFallbackFloor.
+			// Candidates are "name username" for logins, so a query matching
+			// either part can resolve the item.
 			items := decryptCipherList()
-			names := make([]string, len(items))
-			for i, it := range items {
-				names[i] = it.name
+			cands := make([]string, len(items))
+			for i := range items {
+				cands[i] = items[i].matchText()
 			}
-			if auto := autoSelectCandidate(fuzzyRank(cipherName, names)); auto != nil {
-				fmt.Fprintf(os.Stderr, "warning: no exact match for %q, using %q\n", cipherName, auto.name)
-				c, err = findCipherByName(auto.name)
-				if err != nil {
-					return err
+			if auto := autoSelectCandidate(fuzzyRank(cipherName, cands)); auto != nil {
+				// Map the winning candidate back to its item (duplicate
+				// name+username pairs resolve to the first, as before).
+				var picked *pickerItem
+				for i, cand := range cands {
+					if cand == auto.name {
+						picked = &items[i]
+						break
+					}
 				}
+				if picked == nil {
+					return fmt.Errorf("internal: fuzzy match %q has no item", auto.name)
+				}
+				fmt.Fprintf(os.Stderr, "warning: no exact match for %q, using %q\n", cipherName, picked.name)
+				c, cipherName = picked.cipher, picked.name
 			} else if isTerminalFunc(int(os.Stdin.Fd())) {
 				// Weak/ambiguous: let the user confirm via the picker, with
 				// their query pre-typed so they can fix a typo or pick the
@@ -223,7 +234,19 @@ func decryptCipherList() []pickerItem {
 			fmt.Fprintf(os.Stderr, "warning: could not decrypt name of cipher %s: %v\n", c.ID, err)
 			continue
 		}
-		items = append(items, pickerItem{cipher: c, name: name, typ: c.Type})
+		it := pickerItem{cipher: c, name: name, typ: c.Type}
+		// For logins, also surface the username so fuzzy matching and the
+		// picker can disambiguate by it. A failing username decrypt is
+		// non-fatal (the item still works, just without a username), but
+		// warn so the user knows the row is missing it.
+		if c.Type == CipherLogin && c.Login != nil && !c.Login.Username.IsZero() {
+			if u, err := secrets.decryptFieldStr(c, c.Login.Username); err == nil {
+				it.username = u
+			} else {
+				fmt.Fprintf(os.Stderr, "warning: could not decrypt username of cipher %s: %v\n", c.ID, err)
+			}
+		}
+		items = append(items, it)
 	}
 	return items
 }

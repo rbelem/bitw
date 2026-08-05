@@ -199,7 +199,7 @@ func (c *smClient) listSecrets(ctx context.Context) (*smListResponse, error) {
 	if c.listCache != nil {
 		return c.listCache, nil
 	}
-	url := fmt.Sprintf("%s/organizations/%s/secrets", apiURL, c.orgID)
+	url := fmt.Sprintf("%s/public/organizations/%s/secrets", apiURL, c.orgID)
 	var resp smListResponse
 	if err := jsonGETWithToken(ctx, url, c.apiToken, &resp); err != nil {
 		return nil, err
@@ -515,7 +515,7 @@ func (c *smClient) resolveSecretID(ctx context.Context, keyOrID, projectName str
 	// Try to parse as UUID
 	if _, err := uuid.Parse(keyOrID); err == nil {
 		// Check if it's a valid secret ID
-		url := fmt.Sprintf("%s/secrets/%s", apiURL, keyOrID)
+		url := fmt.Sprintf("%s/public/secrets/%s", apiURL, keyOrID)
 		var scratch smSecretResponse
 		if fetchErr := jsonGETWithToken(ctx, url, c.apiToken, &scratch); fetchErr == nil {
 			if projectName != "" {
@@ -549,7 +549,7 @@ func (c *smClient) resolveSecretID(ctx context.Context, keyOrID, projectName str
 // fetchSecret fetches a secret by its ID and returns the raw response.
 // The caller must decrypt the Key, Value, and Note fields.
 func (c *smClient) fetchSecret(ctx context.Context, secretID string) (*smSecretResponse, error) {
-	url := fmt.Sprintf("%s/secrets/%s", apiURL, secretID)
+	url := fmt.Sprintf("%s/public/secrets/%s", apiURL, secretID)
 	var resp smSecretResponse
 	if err := jsonGETWithToken(ctx, url, c.apiToken, &resp); err != nil {
 		return nil, smError(err, "get secret")
@@ -622,7 +622,7 @@ func (c *smClient) smCreate(ctx context.Context, key, value, projectID string) e
 		return err
 	}
 
-	url := fmt.Sprintf("%s/secrets", apiURL)
+	url := fmt.Sprintf("%s/public/secrets", apiURL)
 	body := map[string]interface{}{
 		"organizationId": c.orgID,
 		"key":            encKey,
@@ -703,7 +703,7 @@ func (c *smClient) smEdit(ctx context.Context, secretID, newKey, newValue, newNo
 		return err
 	}
 
-	url := fmt.Sprintf("%s/secrets/%s", apiURL, secretID)
+	url := fmt.Sprintf("%s/public/secrets/%s", apiURL, secretID)
 	body := map[string]interface{}{
 		"key":   encKey,
 		"value": encValue,

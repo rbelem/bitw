@@ -53,11 +53,22 @@ var (
 )
 
 // pickerItem is one selectable row: a decrypted name plus the cipher it
-// belongs to and its type (for the badge).
+// belongs to, its type (for the badge), and (for logins) its username,
+// which is shown after the name and included in fuzzy matching.
 type pickerItem struct {
-	cipher *Cipher
-	name   string
-	typ    CipherType
+	cipher   *Cipher
+	name     string
+	username string
+	typ      CipherType
+}
+
+// matchText returns the text fuzzy matching and display run against: the
+// cipher name, plus the username (for logins) so both are searchable.
+func (it *pickerItem) matchText() string {
+	if it.username == "" {
+		return it.name
+	}
+	return it.name + " " + it.username
 }
 
 // pickerRow is a ranked match row kept alongside its originating item so the
@@ -114,7 +125,7 @@ func (m *pickerModel) recompute() {
 		}
 	} else {
 		for i := range m.items {
-			score, spans := fuzzyScore(q, m.items[i].name)
+			score, spans := fuzzyScore(q, m.items[i].matchText())
 			if score > 0 {
 				m.rows = append(m.rows, pickerRow{item: &m.items[i], score: score, spans: spans})
 			}
@@ -256,6 +267,23 @@ func styledName(name string, spans []int, selected bool) string {
 	return b.String()
 }
 
+// pickerUserMax caps how many runes of a login username are shown dimmed
+// after the cipher name; the name's share of the row width shrinks to fit it.
+const pickerUserMax = 24
+
+// spansInRange keeps byte-offset spans that fall inside [lo, hi), shifted
+// down by lo. Used to slice fuzzy spans (which are offsets into the full
+// "name username" match text) down to a single display segment.
+func spansInRange(spans []int, lo, hi int) []int {
+	var out []int
+	for _, s := range spans {
+		if s >= lo && s < hi {
+			out = append(out, s-lo)
+		}
+	}
+	return out
+}
+
 // renderRowLine builds a single visible row (no trailing newline).
 func renderRowLine(row pickerRow, selected bool, width int) string {
 	marker := "  "
@@ -266,8 +294,33 @@ func renderRowLine(row pickerRow, selected bool, width int) string {
 	if w := utf8.RuneCountInString(badge); w < 5 {
 		badge += strings.Repeat(" ", 5-w)
 	}
-	name := truncateName(row.item.name, width-2-5-1-1)
-	body := marker + "\x1b[2m" + badge + "\x1b[22m " + styledName(name, row.spans, selected)
+	nameMax := width - 2 - 5 - 1 - 1
+	username := row.item.username
+	if username != "" {
+		nameMax -= 1 + pickerUserMax
+		if nameMax < 4 {
+			// Terminal too narrow for both name and username: drop the
+			// username and give the name the full row width.
+			username = ""
+			nameMax = width - 2 - 5 - 1 - 1
+		}
+	}
+	name := truncateName(row.item.name, nameMax)
+	nameSpans := spansInRange(row.spans, 0, len(name))
+	body := marker + "\x1b[2m" + badge + "\x1b[22m " + styledName(name, nameSpans, selected)
+	if username != "" {
+		usr := truncateName(username, pickerUserMax)
+		// Spans are byte offsets into "name username"; shift the ones that
+		// land in the username into its coordinate space.
+		usrSpans := spansInRange(row.spans, len(row.item.name)+1, len(row.item.name)+1+len(usr))
+		if len(usrSpans) > 0 {
+			// A matched username is rendered with the same emphasis as the
+			// name (dim would conflict with the emphasis's intensity codes).
+			body += " " + styledName(usr, usrSpans, selected)
+		} else {
+			body += " " + dim(usr)
+		}
+	}
 	if selected {
 		return "\x1b[7m" + body + "\x1b[0m\x1b[K"
 	}
